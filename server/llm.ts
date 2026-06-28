@@ -28,7 +28,7 @@ function cleanAndParseJson(text: string): any {
 const NVIDIA_BASE_URL =
   process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1";
 const NVIDIA_MODEL =
-  process.env.NVIDIA_MODEL || "meta/llama-3.3-70b-instruct";
+  process.env.NVIDIA_MODEL || "deepseek-ai/deepseek-v4-pro";
 
 async function callLlm(prompt: string, jsonMode = true): Promise<string> {
   const apiKey = process.env.NVIDIA_API_KEY;
@@ -60,9 +60,10 @@ async function callLlm(prompt: string, jsonMode = true): Promise<string> {
           ]
         : [{ role: "user", content: prompt }],
       response_format: jsonMode ? { type: "json_object" } : undefined,
-      temperature: 0.2,
-      top_p: 0.7,
-      max_tokens: 2048,
+      temperature: 1,
+      top_p: 0.95,
+      max_tokens: 16384,
+      chat_template_kwargs: { thinking: false },
     }),
     signal: AbortSignal.timeout(40000),
   });
@@ -293,27 +294,294 @@ Return ONLY valid JSON.`;
   return cleanAndParseJson(rawResponse);
 }
 
-// Generate landing page details (HTML/Tailwind)
+const NICHE_IMAGES: Record<string, string> = {
+  roofing: 'https://images.unsplash.com/photo-1632759162463-157fda98c542?auto=format&fit=crop&w=800&q=80',
+  plumbing: 'https://images.unsplash.com/photo-1504328345606-18bbc8c9d7d1?auto=format&fit=crop&w=800&q=80',
+  tree: 'https://images.unsplash.com/photo-1590138221364-c472223b9d4e?auto=format&fit=crop&w=800&q=80',
+  ac: 'https://images.unsplash.com/photo-1621905252507-b354bc25edac?auto=format&fit=crop&w=800&q=80',
+  hvac: 'https://images.unsplash.com/photo-1621905252507-b354bc25edac?auto=format&fit=crop&w=800&q=80',
+  concrete: 'https://images.unsplash.com/photo-1589939705384-5185137a7f0f?auto=format&fit=crop&w=800&q=80',
+  landscaping: 'https://images.unsplash.com/photo-1558904541-efa8c1a68f6a?auto=format&fit=crop&w=800&q=80',
+  pest: 'https://images.unsplash.com/photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=800&q=80',
+  electrician: 'https://images.unsplash.com/photo-1621905251189-08b45d6a269e?auto=format&fit=crop&w=800&q=80',
+  drywall: 'https://images.unsplash.com/photo-1589939705384-5185137a7f0f?auto=format&fit=crop&w=800&q=80',
+  appliance: 'https://images.unsplash.com/photo-1581578731548-c64695cc6952?auto=format&fit=crop&w=800&q=80',
+};
+
+function getHeroImageForNiche(niche: string): string {
+  const clean = niche.toLowerCase().trim();
+  for (const [k, v] of Object.entries(NICHE_IMAGES)) {
+    if (clean.includes(k)) return v;
+  }
+  return 'https://images.unsplash.com/photo-1581094288338-2314dddb7ecc?auto=format&fit=crop&w=800&q=80';
+}
+
+function buildHtmlFromTemplate(data: any, niche: string, city: string, phone: string): string {
+  const servicesHtml = (data.services || [])
+    .map((s: any) => `
+      <div class="bg-slate-800/40 backdrop-blur-sm border border-slate-700/50 p-6 rounded-2xl hover:border-blue-500/30 transition-all duration-300 group hover:-translate-y-1">
+        <div class="w-12 h-12 rounded-xl bg-blue-500/10 flex items-center justify-center text-blue-400 mb-4 group-hover:bg-blue-500/20 transition-all">
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+        </div>
+        <h3 class="text-lg font-bold text-white mb-2">${s.title}</h3>
+        <p class="text-sm text-slate-400">${s.description}</p>
+      </div>
+    `).join('\n');
+
+  const testimonialsHtml = (data.testimonials || [])
+    .map((t: any) => `
+      <div class="bg-slate-800/20 border border-slate-700/30 p-6 rounded-2xl">
+        <div class="flex items-center gap-1 text-amber-400 mb-3">
+          ${Array(t.stars || 5).fill(0).map(() => `
+            <svg class="w-4 h-4 fill-current" viewBox="0 0 20 20"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"/></svg>
+          `).join('')}
+        </div>
+        <p class="text-slate-300 text-sm italic mb-4">"${t.text}"</p>
+        <span class="text-xs font-semibold text-white">— ${t.name}</span>
+      </div>
+    `).join('\n');
+
+  const whyChooseUsHtml = (data.whyChooseUs || [])
+    .map((w: string) => `
+      <li class="flex items-start gap-3">
+        <svg class="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+        <span class="text-slate-300 text-sm">${w}</span>
+      </li>
+    `).join('\n');
+
+  const heroImage = getHeroImageForNiche(niche);
+
+  return `<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${data.siteTitle || `Professional ${niche} in ${city}`}</title>
+  <meta name="description" content="${data.metaDescription || `Looking for ${niche} services in ${city}? Contact us today at ${phone}.`}">
+  <!-- Tailwind CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Google Font -->
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <style>
+    body {
+      font-family: 'Outfit', sans-serif;
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col selection:bg-blue-500/30">
+
+  <!-- Header -->
+  <header class="sticky top-0 z-50 bg-slate-950/80 backdrop-blur-md border-b border-slate-800/50">
+    <div class="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
+      <div class="flex items-center gap-2">
+        <div class="w-8 h-8 rounded-lg bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center font-bold text-white shadow-lg shadow-blue-500/20">
+          ${niche.charAt(0).toUpperCase()}
+        </div>
+        <span class="font-bold text-lg tracking-tight bg-gradient-to-r from-white via-slate-100 to-slate-400 bg-clip-text text-transparent">${city} ${niche} Pro</span>
+      </div>
+      
+      <a href="tel:${phone.replace(/[^\d+]/g, '')}" class="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-sm transition-all shadow-lg shadow-blue-600/10 hover:shadow-blue-600/20 active:scale-95">
+        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"/></svg>
+        <span>${phone}</span>
+      </a>
+    </div>
+  </header>
+
+  <!-- Hero Section -->
+  <section class="relative py-20 lg:py-28 overflow-hidden">
+    <div class="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,rgba(37,99,235,0.08),transparent_50%)]"></div>
+    <div class="max-w-7xl mx-auto px-6 relative grid lg:grid-cols-12 gap-12 items-center">
+      <div class="lg:col-span-7 space-y-6">
+        <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-xs font-semibold text-blue-400">
+          <svg class="w-4 h-4 fill-current" viewBox="0 0 20 20"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"/></svg>
+          <span>Highly Rated Local Service</span>
+        </div>
+        <h1 class="text-4xl md:text-5xl lg:text-6xl font-bold tracking-tight text-white leading-tight">
+          ${data.heroHeadline}
+        </h1>
+        <p class="text-lg text-slate-400 font-normal">
+          ${data.heroSubheadline}
+        </p>
+        
+        <div class="flex flex-col sm:flex-row gap-4 pt-4">
+          <a href="tel:${phone.replace(/[^\d+]/g, '')}" class="inline-flex items-center justify-center gap-3 px-8 py-4 rounded-2xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-base transition-all shadow-xl shadow-blue-600/20 active:scale-95">
+            <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"/></svg>
+            <span>Call Now: ${phone}</span>
+          </a>
+          <a href="#quote" class="inline-flex items-center justify-center px-8 py-4 rounded-2xl bg-slate-800 hover:bg-slate-700 text-white border border-slate-700/60 font-semibold text-base transition-all active:scale-95">
+            Get a Free Quote
+          </a>
+        </div>
+      </div>
+      <div class="lg:col-span-5 relative">
+        <div class="absolute -inset-1 rounded-2xl bg-gradient-to-tr from-blue-600 to-indigo-500 opacity-20 blur-xl"></div>
+        <div class="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-2xl aspect-[4/3]">
+          <img src="${heroImage}" alt="${niche} in ${city}" class="w-full h-full object-cover">
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Services Section -->
+  <section class="py-20 border-t border-slate-900 bg-slate-950 relative">
+    <div class="max-w-7xl mx-auto px-6 relative space-y-12">
+      <div class="text-center max-w-2xl mx-auto space-y-4">
+        <h2 class="text-3xl font-bold text-white">Our Professional Services</h2>
+        <p class="text-slate-400 text-sm">We provide expert, fully licensed, and highly experienced ${niche} services across ${city} and surrounding areas.</p>
+      </div>
+      
+      <div class="grid md:grid-cols-3 gap-8">
+        ${servicesHtml}
+      </div>
+    </div>
+  </section>
+
+  <!-- About Us Section -->
+  <section class="py-20 border-t border-slate-900 bg-slate-900/30">
+    <div class="max-w-7xl mx-auto px-6 grid md:grid-cols-2 gap-12 items-center">
+      <div class="space-y-6">
+        <h2 class="text-3xl font-bold text-white">About Us</h2>
+        <div class="text-slate-400 space-y-4 text-sm leading-relaxed">
+          ${data.aboutUsText ? data.aboutUsText.split('\n').map((p: string) => `<p>${p}</p>`).join('') : `<p>We are a dedicated local service provider in ${city}. We value safety, reliability, and top-tier workmanship.</p>`}
+        </div>
+        <ul class="grid sm:grid-cols-2 gap-3 pt-2">
+          ${whyChooseUsHtml}
+        </ul>
+      </div>
+      <div class="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 aspect-video">
+        <img src="https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=800&q=80" alt="Worksite" class="w-full h-full object-cover">
+      </div>
+    </div>
+  </section>
+
+  <!-- Testimonials -->
+  <section class="py-20 border-t border-slate-900 bg-slate-950">
+    <div class="max-w-7xl mx-auto px-6 space-y-12">
+      <div class="text-center max-w-2xl mx-auto">
+        <h2 class="text-3xl font-bold text-white">What Our Customers Say</h2>
+      </div>
+      <div class="grid md:grid-cols-2 gap-8">
+        ${testimonialsHtml}
+      </div>
+    </div>
+  </section>
+
+  <!-- Quote Form Section -->
+  <section id="quote" class="py-20 border-t border-slate-900 bg-slate-900/30 relative">
+    <div class="max-w-3xl mx-auto px-6">
+      <div class="bg-slate-900 border border-slate-800 p-8 md:p-12 rounded-3xl space-y-6 shadow-2xl relative">
+        <div class="text-center space-y-2">
+          <h2 class="text-2xl font-bold text-white">Request a Free Estimate</h2>
+          <p class="text-slate-400 text-xs">Fill out the form below and our team will get in touch shortly.</p>
+        </div>
+        
+        <form id="contactForm" class="space-y-4">
+          <div class="grid sm:grid-cols-2 gap-4">
+            <div>
+              <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Name</label>
+              <input type="text" required class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-slate-100 text-sm focus:border-blue-500 focus:outline-none transition-all">
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Phone</label>
+              <input type="tel" required class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-slate-100 text-sm focus:border-blue-500 focus:outline-none transition-all">
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Email</label>
+            <input type="email" required class="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-slate-100 text-sm focus:border-blue-500 focus:outline-none transition-all">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Message</label>
+            <textarea required rows="4" class="w-full bg-slate-950 border border-slate-800 rounded-xl p-4 text-slate-100 text-sm focus:border-blue-500 focus:outline-none transition-all"></textarea>
+          </div>
+          <button type="submit" class="w-full inline-flex items-center justify-center px-6 py-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-base transition-all shadow-lg shadow-blue-600/10 active:scale-95">
+            Submit Estimate Request
+          </button>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="mt-auto border-t border-slate-900 bg-slate-950 py-10">
+    <div class="max-w-7xl mx-auto px-6 flex flex-col md:flex-row justify-between items-center gap-6">
+      <p class="text-xs text-slate-500">&copy; ${new Date().getFullYear()} ${city} ${niche} Pro. All rights reserved.</p>
+      <div class="flex items-center gap-6 text-xs text-slate-400">
+        <span>Call: ${phone}</span>
+        <span>•</span>
+        <span>SEO Optimized Local Asset</span>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Floating Mobile CTA -->
+  <div class="fixed bottom-6 right-6 z-40 sm:hidden">
+    <a href="tel:${phone.replace(/[^\d+]/g, '')}" class="w-14 h-14 rounded-full bg-blue-600 hover:bg-blue-500 flex items-center justify-center text-white shadow-2xl shadow-blue-500/30 transition-all active:scale-95">
+      <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 20 20"><path d="M2 3a1 1 0 011-1h2.153a1 1 0 01.986.836l.74 4.435a1 1 0 01-.54 1.06l-1.548.773a11.037 11.037 0 006.105 6.105l.774-1.548a1 1 0 011.059-.54l4.435.74a1 1 0 01.836.986V17a1 1 0 01-1 1h-2C7.82 18 2 12.18 2 5V3z"/></svg>
+    </a>
+  </div>
+
+  <!-- Form Success Popup -->
+  <div id="successModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 opacity-0 pointer-events-none transition-all duration-300">
+    <div class="bg-slate-900 border border-slate-800 p-8 rounded-3xl text-center max-w-sm space-y-4 mx-4 shadow-2xl">
+      <div class="w-12 h-12 rounded-full bg-emerald-500/10 text-emerald-400 flex items-center justify-center mx-auto">
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M5 13l4 4L19 7"/></svg>
+      </div>
+      <h3 class="text-lg font-bold text-white">Estimate Request Received!</h3>
+      <p class="text-xs text-slate-400">Thank you for reaching out. A local representative will contact you shortly.</p>
+      <button onclick="closeModal()" class="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-sm font-semibold transition-all">Close</button>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById('contactForm');
+    const modal = document.getElementById('successModal');
+    
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      modal.classList.remove('opacity-0', 'pointer-events-none');
+      form.reset();
+    });
+    
+    function closeModal() {
+      modal.classList.add('opacity-0', 'pointer-events-none');
+    }
+  </script>
+
+</body>
+</html>`;
+}
+
+// Generate landing page details using a robust template & fast LLM copy generation
 export async function generateLandingPage(niche: string, city: string, phone: string, whisper: string): Promise<GeneratedSite> {
   const targetId = `site-target-${Date.now()}`;
-  const prompt = `You are an elite web designer and Rank & Rent SEO copywriter.
-Generate a highly converting, fully responsive local landing page for "${niche}" in "${city}".
-The landing page will have a prominent phone number tracking line: "${phone}".
-We will route calls through this tracking line.
+  const prompt = `You are performing professional SEO copy writing for a local lead generation website.
+We need to generate high-converting text content for a local service landing page.
+Niche: "${niche}"
+Location: "${city}"
+Phone Number: "${phone}"
 
 You must output a JSON object containing:
 1. "siteTitle": SEO-optimized title (e.g. "Best ${niche} Services in ${city} | Free Quotes")
-2. "metaDescription": SEO description containing phone number
-3. "primaryColor": Suggested hex color theme (e.g., "#0284c7")
-4. "heroHeadline": SEO-optimized hero headline
-5. "heroSubheadline": Conversion-optimized subheadline
-6. "services": array of at least 3 strings (services provided)
-7. "htmlCode": Complete, beautiful, production-ready HTML code using Tailwind CSS for design. It should contain About Us, Services, Why Choose Us, Free Quote Form, Testimonials, and embed the phone number "${phone}" into call-to-action buttons. The form should submit with a success alert message. Do not include markdown wraps inside this string.
+2. "metaDescription": SEO description containing the phone number
+3. "primaryColor": Suggested hex color theme (e.g. "#2563eb", "#0284c7")
+4. "heroHeadline": SEO-optimized hero headline (e.g. "Top-Rated ${niche} Specialists in ${city}")
+5. "heroSubheadline": Conversion-focused subheadline prompting user to call
+6. "aboutUsText": A detailed two-paragraph introduction about the local company's history, local pride, quality focus, and dedication to serving ${city}.
+7. "services": An array of exactly 3 objects representing core services. Each object must have:
+   * "title": string (e.g. "Residential Roofing")
+   * "description": string (detailed service benefit description)
+8. "whyChooseUs": An array of exactly 4 brief key advantages (e.g. "24/7 Emergency Support")
+9. "testimonials": An array of exactly 2 customer reviews. Each object must have:
+   * "name": string (e.g. "John D.")
+   * "text": string (detailed positive feedback)
+   * "stars": integer (usually 5)
 
-Return ONLY a valid JSON object matching these fields.`;
+Return ONLY valid JSON that matches the schema above. Do not wrap in conversational markdown text.`;
 
   const rawResponse = await callLlm(prompt, true);
   const data = cleanAndParseJson(rawResponse);
+  const htmlCode = buildHtmlFromTemplate(data, niche, city, phone);
 
   return {
     id: `site-${Date.now()}`,
@@ -327,8 +595,8 @@ Return ONLY a valid JSON object matching these fields.`;
     primaryColor: data.primaryColor || "#2563eb",
     heroHeadline: data.heroHeadline,
     heroSubheadline: data.heroSubheadline,
-    services: data.services || [],
-    htmlCode: data.htmlCode,
+    services: (data.services || []).map((s: any) => s.title),
+    htmlCode,
     createdAt: new Date().toISOString()
   };
 }
@@ -381,7 +649,7 @@ export function formatLlmError(err: any): string {
   // Timeout
   if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) {
     return (
-      `NVIDIA LLM request timed out. The 70B model may be under heavy load.\n` +
+      `NVIDIA LLM request timed out. DeepSeek V4 Pro may be under heavy load.\n` +
       `Try again in a few seconds.`
     );
   }
