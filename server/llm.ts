@@ -192,6 +192,17 @@ Return ONLY a valid JSON array of 5 objects matching these fields.`;
           lead.notes = `[Verified Contact Info]\nEmail: ${contact.email}\nPhone: ${lead.phone || "Not found"}`;
         }
       }
+      // Fallback: if the website crawl didn't find an email but the lead
+      // has a domain, generate a best-guess business email so the lead
+      // can flow through pitching -> Stripe customer -> auto-subscribe.
+      if (!lead.email && lead.website) {
+        try {
+          const host = new URL(lead.website).hostname.replace(/^www\./, '');
+          lead.email = `info@${host}`;
+          lead.notes = (lead.notes ? lead.notes + '\n' : '') +
+            `[Generated Contact] Email (best-guess from domain): ${lead.email}`;
+        } catch {}
+      }
     }
     return leads;
   } catch (err) {
