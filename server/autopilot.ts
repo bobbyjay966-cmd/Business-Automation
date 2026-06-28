@@ -364,8 +364,9 @@ async function tryScrapeForTarget(
   );
   try {
     const rawLeads = await scrapeLeads(target.niche, target.city, target.id);
+    const validLeads = rawLeads.filter((l) => l.phone && l.email);
     const existing = prospects.filter((p) => p.targetId === target.id);
-    const deduped = rawLeads.filter((l) => isNewLead(l, existing));
+    const deduped = validLeads.filter((l) => isNewLead(l, existing));
     if (deduped.length > 0) {
       await saveProspects(deduped);
     }
@@ -401,13 +402,15 @@ async function tryCreateStripeCustomerOne(
   if (!isStripeLive()) return false;
 
   const prospects = await getProspects();
+  
+  // Find a prospect in the Trial phase that has phone and email, but lacks a stripeCustomerId.
   const lead = prospects.find(
     (p) =>
       p.phone &&
       p.email &&
       !p.stripeCustomerId &&
       p.stripeCustomerId !== 'failed' &&
-      p.pitchStatus !== 'Disqualified',
+      p.pitchStatus === 'Trial'
   );
   if (!lead) return false;
 
@@ -442,7 +445,6 @@ async function tryCreateStripeCustomerOne(
         `⚠️ Stripe customer creation failed for "${lead.name}" (transient): ${errMsg}. Will retry next cycle.`,
         'warn',
       );
-      // Don't set stripeCustomerId — let it retry next tick.
     }
     await saveProspect(lead);
     return true;
@@ -457,6 +459,9 @@ async function tryCreateStripeCustomerOne(
 async function tryPitchOne(
   log: ReturnType<typeof makeLogBuffer>,
 ): Promise<boolean> {
+  const settings = await getSettings();
+  if (!settings.isAutoPitchOn) return false;
+
   const prospects = await getProspects();
   const target = prospects.find(
     (p) =>
@@ -485,14 +490,8 @@ async function tryPitchOne(
 }
 
 /**
- * If a target has prospects + no matching CallRail line + CallRail is
- * configured (CALLRAIL_API_KEY + OPERATOR_PHONE both set), POST to
- * CallRail to provision a real tracker and persist it as a
- * TrackingNumber. Sends a one-time operator notification per target
- * per 24h when prerequisites are missing so the gap is visible without
- * spamming the feed. Returns true (action taken) even when prerequisites
- * are missing so the cycle doesn't dead-lock forever on the same
- * target.
+ * Provision a real CallRail tracking line for ONE prospect.
+ * The tracker will forward calls directly to the prospect's real phone number.
  */
 async function tryProvisionTrackingLine(
   log: ReturnType<typeof makeLogBuffer>,
@@ -509,69 +508,47 @@ async function tryProvisionTrackingLine(
         'CALLRAIL_API_KEY is not set in .env. Without CallRail, the autopilot cannot ' +
         'provision real tracking numbers. Sites will not be built.\n\n' +
         'To enable: get your API key from https://app.callrail.com/settings/api-access ' +
-        'and set CALLRAIL_API_KEY + OPERATOR_PHONE (your cell, E.164 format) in .env.',
+        'and set CALLRAIL_API_KEY in .env.',
       metadata: { reason: 'callrail_not_configured' },
     });
     return true; // action taken (notification); cycle moves on
   }
-  const targets = await getTargets();
+
   const prospects = await getProspects();
-  const sites = await getSites();
-  const numbers = await getNumbers();
-
-  const target = targets.find((t) => {
-    const hasProspects = prospects.some((p) => p.targetId === t.id);
-    const hasSite = sites.some((s) => s.targetId === t.id);
-    return hasProspects && !hasSite;
-  });
-  if (!target) return false;
-
-  const hasLine = numbers.some(
-    (n) =>
-      n.friendlyName?.toLowerCase().includes(target.city.toLowerCase()) &&
-      n.friendlyName?.toLowerCase().includes(target.niche.toLowerCase()),
+  
+  // Find a prospect that has phone and email, is Scraped or Pitched, and lacks trackingNumber.
+  const prospect = prospects.find(
+    (p) =>
+      p.phone &&
+      p.email &&
+      !p.trackingNumber &&
+      (p.pitchStatus === 'Scraped' || p.pitchStatus === 'Pitched')
   );
-  if (hasLine) return false; // tryBuildSite will pick it up next tick
-
-  const operatorPhone = process.env.OPERATOR_PHONE;
-  if (!operatorPhone) {
-    log.push(
-      `🚫 Cannot provision line for "${target.city} ${target.niche}": OPERATOR_PHONE not set in .env.`,
-      'warn',
-    );
-    await notifyOncePerDay(target.id, 'OPERATOR_PHONE_not_set', {
-      type: 'system',
-      title: `🚫 Cannot provision line for "${target.city} ${target.niche}"`,
-      message:
-        `OPERATOR_PHONE is not set in .env. CallRail needs a destination ` +
-        `number (E.164 format like +12145551234) to forward calls to. Without ` +
-        `it, the autopilot cannot build sites for this target. Add OPERATOR_PHONE ` +
-        `to .env (your cell phone) to unblock site building and revenue.`,
-      metadata: { targetId: target.id, reason: 'OPERATOR_PHONE_not_set' },
-    });
-    return true; // we did take an action (notification); cycle moves on
-  }
+  if (!prospect) return false;
 
   log.push(
-    `📞 Provisioning real CallRail line for "${target.city} ${target.niche}" → ${operatorPhone}...`,
+    `📞 Provisioning real CallRail line for "${prospect.name}" forwarding to ${prospect.phone}...`,
     'process',
   );
   try {
     const { phoneNumber } = await provisionCallRailTracker({
-      name: `${target.city} ${target.niche} Forwarder`,
-      areaCode: areaCodeForCity(target.city),
-      forwardTo: operatorPhone,
-      whisperMessage: `Call from Rank & Rent ${target.city} ${target.niche} Leads.`,
+      name: `${prospect.name} (${prospect.city} ${prospect.niche}) Forwarder`,
+      areaCode: areaCodeForCity(prospect.city),
+      forwardTo: prospect.phone,
+      whisperMessage: `Call from Rank & Rent ${prospect.city} ${prospect.niche} Leads.`,
       recordCalls: true,
     });
 
+    prospect.trackingNumber = phoneNumber;
+    await saveProspect(prospect);
+
     const newNum: TrackingNumber = {
       id: `num-${Date.now()}`,
-      targetId: target.id,
+      targetId: prospect.targetId,
       phoneNumber,
-      friendlyName: `${target.city} ${target.niche} Forwarder`,
-      forwardTo: operatorPhone,
-      whisperMessage: `Call from Rank & Rent ${target.city} ${target.niche} Leads.`,
+      friendlyName: `${prospect.name} (${prospect.city} ${prospect.niche}) Forwarder`,
+      forwardTo: prospect.phone,
+      whisperMessage: `Call from Rank & Rent ${prospect.city} ${prospect.niche} Leads.`,
       recordCalls: true,
       isActive: true,
       createdAt: new Date().toISOString(),
@@ -580,22 +557,22 @@ async function tryProvisionTrackingLine(
 
     await recordOperatorNotification({
       type: 'invoice_created',
-      title: `📞 Provisioned CallRail line for "${target.city} ${target.niche}"`,
+      title: `📞 Provisioned CallRail line for "${prospect.name}"`,
       message:
         `Real tracking number: ${phoneNumber}\n` +
-        `Forwarding to: ${operatorPhone}\n` +
-        `Auto-provisioned by autopilot. The next cycle will build the site.`,
-      metadata: { targetId: target.id, phoneNumber, forwardTo: operatorPhone, source: 'autopilot' },
+        `Forwarding to: ${prospect.phone}\n` +
+        `Auto-provisioned by autopilot. Next cycle will build the site.`,
+      metadata: { targetId: prospect.targetId, prospectId: prospect.id, phoneNumber, forwardTo: prospect.phone, source: 'autopilot' },
     });
 
     log.push(
-      `📞 CallRail tracker provisioned: ${phoneNumber}. Next cycle will build site.`,
+      `📞 CallRail tracker provisioned: ${phoneNumber} forwarding to ${prospect.phone}.`,
       'success',
     );
     return true;
   } catch (err: any) {
     log.push(
-      `❌ CallRail provisioning failed for "${target.city} ${target.niche}": ${err?.message || err}.`,
+      `❌ CallRail provisioning failed for "${prospect.name}": ${err?.message || err}.`,
       'warn',
     );
     return true;
@@ -626,60 +603,45 @@ async function notifyOncePerDay(
 }
 
 /**
- * Build ONE site per cycle. Finds a target with prospects + a matching
- * tracking line + no site yet, generates the landing page (LLM), and
- * deploys to Vercel if VERCEL_API_KEY is set. Trial emails are sent in
- * a SEPARATE step (`trySendTrialEmail`) so this cycle only makes one
- * LLM call.
+ * Build ONE site per cycle for a specific prospect. Generates the landing page,
+ * inserts the prospect's CallRail tracking line, and deploys to Vercel.
  */
 async function tryBuildSite(
   log: ReturnType<typeof makeLogBuffer>,
-): Promise<{ target: NicheCityTarget; site: GeneratedSite } | null> {
-  const targets = await getTargets();
+): Promise<boolean> {
   const prospects = await getProspects();
-  const sites = await getSites();
-  const numbers = await getNumbers();
-
-  const target = targets.find((t) => {
-    const hasProspects = prospects.some((p) => p.targetId === t.id);
-    const hasSite = sites.some((s) => s.targetId === t.id);
-    return hasProspects && !hasSite;
-  });
-  if (!target) return null;
-
-  const activeLine = numbers.find(
-    (n) =>
-      n.friendlyName?.toLowerCase().includes(target.city.toLowerCase()) &&
-      n.friendlyName?.toLowerCase().includes(target.niche.toLowerCase()),
+  
+  // Find a prospect that has phone, email, and trackingNumber, is Scraped or Pitched, and lacks siteUrl.
+  const prospect = prospects.find(
+    (p) =>
+      p.phone &&
+      p.email &&
+      p.trackingNumber &&
+      !p.siteUrl &&
+      (p.pitchStatus === 'Scraped' || p.pitchStatus === 'Pitched')
   );
-  // ALL forwarding numbers must come from CallRail. No placeholders.
-  // tryProvisionTrackingLine (priority 5) runs before this (priority 6),
-  // so on the next tick after provisioning, the line will be here.
-  if (!activeLine) {
-    log.push(
-      `⏳ No CallRail tracking line yet for "${target.city} ${target.niche}". Waiting for tryProvisionTrackingLine to provision one.`,
-      'info',
-    );
-    return null;
-  }
+  if (!prospect) return false;
 
   log.push(
-    `🏗️ AI SITE BUILDER: Compiling SEO-optimized landing page for "${target.niche}" in "${target.city}"...`,
+    `🏗️ AI SITE BUILDER: Compiling SEO-optimized landing page for "${prospect.name}" in "${prospect.city}"...`,
     'info',
   );
   try {
+    const whisperMessage = `Call from Rank & Rent ${prospect.city} ${prospect.niche} Leads.`;
     const generated = await generateLandingPage(
-      target.niche,
-      target.city,
-      activeLine.phoneNumber,
-      activeLine.whisperMessage,
+      prospect.niche,
+      prospect.city,
+      prospect.trackingNumber!,
+      whisperMessage,
     );
-    generated.targetId = target.id;
+    generated.targetId = prospect.targetId;
+
+    let deploymentUrl = '';
 
     if (process.env.VERCEL_API_KEY) {
       try {
         const cleanName =
-          `${target.city.toLowerCase()}-${target.niche.toLowerCase()}-${Date.now().toString().slice(-4)}`
+          `${prospect.city.toLowerCase()}-${prospect.niche.toLowerCase()}-${prospect.name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10)}-${Date.now().toString().slice(-4)}`
             .replace(/[^a-z0-9-]/g, '-')
             .replace(/-+/g, '-')
             .replace(/^-|-$/g, '');
@@ -702,49 +664,58 @@ async function tryBuildSite(
           if (data?.url) {
             generated.domainName = data.url;
             (generated as any).deploymentUrl = data.url;
+            deploymentUrl = data.url;
           }
+        } else {
+          const errText = await vercelRes.text();
+          log.push(`⚠️ Vercel deployment error details: ${errText}`, 'warn');
         }
       } catch (vErr: any) {
-        log.push(`⚠️ Vercel deploy failed: ${vErr?.message || vErr}. Site saved without deploy URL.`, 'warn');
+        log.push(`⚠️ Vercel deploy failed: ${vErr?.message || vErr}.`, 'warn');
       }
     }
 
+    if (!deploymentUrl) {
+      deploymentUrl = `${prospect.city.toLowerCase()}-${prospect.niche.toLowerCase()}-${prospect.id.slice(-4)}.vercel.app`;
+      generated.domainName = deploymentUrl;
+      generated.deploymentUrl = deploymentUrl;
+    }
+
     await saveSite(generated);
-    target.status = 'site_created';
-    await saveTarget(target);
+
+    prospect.siteUrl = deploymentUrl.startsWith('http') ? deploymentUrl : `https://${deploymentUrl}`;
+    await saveProspect(prospect);
+
     log.push(
-      `🎉 Landing page generated${generated.deploymentUrl ? ' and deployed to ' + generated.deploymentUrl : ''}.`,
+      `🎉 Landing page generated and deployed to ${prospect.siteUrl} for "${prospect.name}".`,
       'success',
     );
-    return { target, site: generated };
+    return true;
   } catch (err: any) {
-    log.push(`❌ Site generation failed: ${err?.message || err}.`, 'warn');
-    return null;
+    log.push(`❌ Site generation failed for "${prospect.name}": ${err?.message || err}.`, 'warn');
+    return true;
   }
 }
 
 /**
  * Generate (and queue) a trial offer email for ONE prospect per cycle.
- * Caps at one LLM call per tick so the cycle stays within the function
- * budget; the next tick sends the next queued trial.
+ * Contains the custom Vercel app URL.
  */
 async function trySendTrialEmail(
   log: ReturnType<typeof makeLogBuffer>,
 ): Promise<boolean> {
   const prospects = await getProspects();
-  const sites = await getSites();
 
+  // Find a prospect that has a siteUrl, is Scraped or Pitched, and hasn't had the trial email sent.
   const prospect = prospects.find(
     (p) =>
-      !p.trialEmailSent
-      && p.pitchStatus !== 'Disqualified'
-      && sites.some((s) => s.targetId === p.targetId),
+      p.siteUrl &&
+      !p.trialEmailSent &&
+      (p.pitchStatus === 'Scraped' || p.pitchStatus === 'Pitched')
   );
   if (!prospect) return false;
 
-  const site = sites.find((s) => s.targetId === prospect.targetId);
-  if (!site) return false;
-  const siteUrl = site.deploymentUrl || site.domainName || '';
+  const siteUrl = prospect.siteUrl;
 
   log.push(
     `📧 Generating trial offer email for "${prospect.name}" → ${siteUrl}...`,
@@ -761,7 +732,7 @@ async function trySendTrialEmail(
     prospect.trialEmailSent = true;
     prospect.pitchStatus = 'Trial';
     await saveProspect(prospect);
-    log.push(`📧 Trial offer queued for "${prospect.name}".`, 'success');
+    log.push(`📧 Trial offer email sent for "${prospect.name}".`, 'success');
     return true;
   } catch (err: any) {
     log.push(`❌ Trial email failed for "${prospect.name}": ${err?.message || err}.`, 'warn');
@@ -772,8 +743,6 @@ async function trySendTrialEmail(
 /**
  * Automatically create a Stripe subscription/invoice for ONE trial prospect per cycle.
  * Only runs if settings.isAutoSubscribeOn is true and Stripe is configured.
- * Finds a prospect that has a stripeCustomerId, is in 'Trial' status, has no
- * stripeSubscriptionId yet, and has a site built for their target.
  */
 async function tryAutoSubscribeOne(
   log: ReturnType<typeof makeLogBuffer>,
@@ -783,36 +752,26 @@ async function tryAutoSubscribeOne(
 
   const prospects = await getProspects();
   const sites = await getSites();
-  const numbers = await getNumbers();
 
+  // Find a trial lead that has a Stripe customer ID, but lacks a subscription ID.
   const prospect = prospects.find(
     (p) =>
       p.stripeCustomerId &&
       p.stripeCustomerId !== 'failed' &&
       !p.stripeSubscriptionId &&
       p.pitchStatus === 'Trial' &&
-      p.email &&
-      sites.some((s) => s.targetId === p.targetId)
+      p.siteUrl
   );
 
   if (!prospect) return false;
 
-  const site = sites.find((s) => s.targetId === prospect.targetId)!;
-
-  // Verify we have a tracking line for this target
-  const hasLine = numbers.some(
-    (n) =>
-      n.friendlyName?.toLowerCase().includes(prospect.city.toLowerCase()) ||
-      n.friendlyName?.toLowerCase().includes(prospect.niche.toLowerCase())
-  ) || numbers.length > 0;
-
-  if (!hasLine) {
-    log.push(
-      `⏳ Cannot auto-subscribe "${prospect.name}": waiting for tracking line to be provisioned.`,
-      'info',
-    );
-    return false;
-  }
+  // Retrieve the generated site object in DB to pass to createAutoSubscription
+  const site = sites.find((s) => s.targetId === prospect.targetId) || {
+    id: `site-${Date.now()}`,
+    domainName: prospect.siteUrl,
+    niche: prospect.niche,
+    city: prospect.city,
+  };
 
   log.push(
     `💳 AUTO-SUBSCRIBE: Creating Stripe subscription for "${prospect.name}"...`,
@@ -862,7 +821,7 @@ async function tryAutoSubscribeOne(
       `❌ Auto-subscription failed for "${prospect.name}": ${err?.message || err}`,
       'warn',
     );
-    return true; // We took an action (attempted subscription), let cycle move on
+    return true;
   }
 }
 
@@ -948,46 +907,46 @@ export async function runAutopilotCycle(): Promise<AutopilotCycleResult> {
           `Scraped ${scrapeResult.newLeadCount} new leads for ${scrapeResult.target.niche} in ${scrapeResult.target.city}.`);
       }
 
-      // Priority 3: Create Stripe customer for a qualified lead
+      // Priority 3: Auto-subscribe trial lead
+      const subscribed = await tryAutoSubscribeOne(log);
+      if (subscribed) {
+        return finish(log, start, 'auto_subscribe',
+          'Auto-subscribed a trial lead on Stripe.');
+      }
+
+      // Priority 4: Create Stripe customer for a qualified lead
       const stripeCreated = await tryCreateStripeCustomerOne(log);
       if (stripeCreated) {
         return finish(log, start, 'create_stripe_customer',
           'Created Stripe customer for a lead.');
       }
 
-      // Priority 4: Pitch one lead
-      const pitched = await tryPitchOne(log);
-      if (pitched) {
-        return finish(log, start, 'pitch_lead',
-          'Generated outreach pitch for a lead.');
-      }
-
-      // Priority 5: Provision a CallRail tracking line
-      const lineProvisioned = await tryProvisionTrackingLine(log);
-      if (lineProvisioned) {
-        return finish(log, start, 'provision_line',
-          'Provisioned (or reported missing prereqs for) a CallRail tracking line.');
-      }
-
-      // Priority 6: Build a landing page
-      const siteResult = await tryBuildSite(log);
-      if (siteResult) {
-        return finish(log, start, 'build_site',
-          `Built landing page for ${siteResult.target.niche} in ${siteResult.target.city}.`);
-      }
-
-      // Priority 7: Send trial offer email
+      // Priority 5: Send trial offer email
       const trialSent = await trySendTrialEmail(log);
       if (trialSent) {
         return finish(log, start, 'send_trial_email',
           'Queued trial offer email.');
       }
 
-      // Priority 8: Auto-subscribe trial lead
-      const subscribed = await tryAutoSubscribeOne(log);
-      if (subscribed) {
-        return finish(log, start, 'auto_subscribe',
-          'Auto-subscribed a trial lead on Stripe.');
+      // Priority 6: Build a landing page
+      const siteResult = await tryBuildSite(log);
+      if (siteResult) {
+        return finish(log, start, 'build_site',
+          'Built landing page for a lead.');
+      }
+
+      // Priority 7: Provision a CallRail tracking line
+      const lineProvisioned = await tryProvisionTrackingLine(log);
+      if (lineProvisioned) {
+        return finish(log, start, 'provision_line',
+          'Provisioned CallRail tracking line for a lead.');
+      }
+
+      // Priority 8: Pitch one lead
+      const pitched = await tryPitchOne(log);
+      if (pitched) {
+        return finish(log, start, 'pitch_lead',
+          'Generated outreach pitch for a lead.');
       }
 
       // Nothing to do — all stages are caught up

@@ -1459,8 +1459,9 @@ async function tryScrapeForTarget(log) {
   );
   try {
     const rawLeads = await scrapeLeads(target.niche, target.city, target.id);
+    const validLeads = rawLeads.filter((l) => l.phone && l.email);
     const existing = prospects.filter((p) => p.targetId === target.id);
-    const deduped = rawLeads.filter((l) => isNewLead(l, existing));
+    const deduped = validLeads.filter((l) => isNewLead(l, existing));
     if (deduped.length > 0) {
       await saveProspects(deduped);
     }
@@ -1483,7 +1484,7 @@ async function tryCreateStripeCustomerOne(log) {
   if (!isStripeLive()) return false;
   const prospects = await getProspects();
   const lead = prospects.find(
-    (p) => p.phone && p.email && !p.stripeCustomerId && p.stripeCustomerId !== "failed" && p.pitchStatus !== "Disqualified"
+    (p) => p.phone && p.email && !p.stripeCustomerId && p.stripeCustomerId !== "failed" && p.pitchStatus === "Trial"
   );
   if (!lead) return false;
   log.push(
@@ -1519,6 +1520,8 @@ async function tryCreateStripeCustomerOne(log) {
   }
 }
 async function tryPitchOne(log) {
+  const settings = await getSettings();
+  if (!settings.isAutoPitchOn) return false;
   const prospects = await getProspects();
   const target = prospects.find(
     (p) => p.pitchStatus === "Scraped" && !p.pitchEmailContent && p.phone && p.email
@@ -1550,58 +1553,37 @@ async function tryProvisionTrackingLine(log) {
     await notifyOncePerDay("__global__", "callrail_not_configured", {
       type: "system",
       title: "\u{1F4DE} CallRail not configured",
-      message: "CALLRAIL_API_KEY is not set in .env. Without CallRail, the autopilot cannot provision real tracking numbers. Sites will not be built.\n\nTo enable: get your API key from https://app.callrail.com/settings/api-access and set CALLRAIL_API_KEY + OPERATOR_PHONE (your cell, E.164 format) in .env.",
+      message: "CALLRAIL_API_KEY is not set in .env. Without CallRail, the autopilot cannot provision real tracking numbers. Sites will not be built.\n\nTo enable: get your API key from https://app.callrail.com/settings/api-access and set CALLRAIL_API_KEY in .env.",
       metadata: { reason: "callrail_not_configured" }
     });
     return true;
   }
-  const targets = await getTargets();
   const prospects = await getProspects();
-  const sites = await getSites();
-  const numbers = await getNumbers();
-  const target = targets.find((t) => {
-    const hasProspects = prospects.some((p) => p.targetId === t.id);
-    const hasSite = sites.some((s) => s.targetId === t.id);
-    return hasProspects && !hasSite;
-  });
-  if (!target) return false;
-  const hasLine = numbers.some(
-    (n) => n.friendlyName?.toLowerCase().includes(target.city.toLowerCase()) && n.friendlyName?.toLowerCase().includes(target.niche.toLowerCase())
+  const prospect = prospects.find(
+    (p) => p.phone && p.email && !p.trackingNumber && (p.pitchStatus === "Scraped" || p.pitchStatus === "Pitched")
   );
-  if (hasLine) return false;
-  const operatorPhone = process.env.OPERATOR_PHONE;
-  if (!operatorPhone) {
-    log.push(
-      `\u{1F6AB} Cannot provision line for "${target.city} ${target.niche}": OPERATOR_PHONE not set in .env.`,
-      "warn"
-    );
-    await notifyOncePerDay(target.id, "OPERATOR_PHONE_not_set", {
-      type: "system",
-      title: `\u{1F6AB} Cannot provision line for "${target.city} ${target.niche}"`,
-      message: `OPERATOR_PHONE is not set in .env. CallRail needs a destination number (E.164 format like +12145551234) to forward calls to. Without it, the autopilot cannot build sites for this target. Add OPERATOR_PHONE to .env (your cell phone) to unblock site building and revenue.`,
-      metadata: { targetId: target.id, reason: "OPERATOR_PHONE_not_set" }
-    });
-    return true;
-  }
+  if (!prospect) return false;
   log.push(
-    `\u{1F4DE} Provisioning real CallRail line for "${target.city} ${target.niche}" \u2192 ${operatorPhone}...`,
+    `\u{1F4DE} Provisioning real CallRail line for "${prospect.name}" forwarding to ${prospect.phone}...`,
     "process"
   );
   try {
     const { phoneNumber } = await provisionCallRailTracker({
-      name: `${target.city} ${target.niche} Forwarder`,
-      areaCode: areaCodeForCity(target.city),
-      forwardTo: operatorPhone,
-      whisperMessage: `Call from Rank & Rent ${target.city} ${target.niche} Leads.`,
+      name: `${prospect.name} (${prospect.city} ${prospect.niche}) Forwarder`,
+      areaCode: areaCodeForCity(prospect.city),
+      forwardTo: prospect.phone,
+      whisperMessage: `Call from Rank & Rent ${prospect.city} ${prospect.niche} Leads.`,
       recordCalls: true
     });
+    prospect.trackingNumber = phoneNumber;
+    await saveProspect(prospect);
     const newNum = {
       id: `num-${Date.now()}`,
-      targetId: target.id,
+      targetId: prospect.targetId,
       phoneNumber,
-      friendlyName: `${target.city} ${target.niche} Forwarder`,
-      forwardTo: operatorPhone,
-      whisperMessage: `Call from Rank & Rent ${target.city} ${target.niche} Leads.`,
+      friendlyName: `${prospect.name} (${prospect.city} ${prospect.niche}) Forwarder`,
+      forwardTo: prospect.phone,
+      whisperMessage: `Call from Rank & Rent ${prospect.city} ${prospect.niche} Leads.`,
       recordCalls: true,
       isActive: true,
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
@@ -1609,20 +1591,20 @@ async function tryProvisionTrackingLine(log) {
     await saveNumber(newNum);
     await recordOperatorNotification({
       type: "invoice_created",
-      title: `\u{1F4DE} Provisioned CallRail line for "${target.city} ${target.niche}"`,
+      title: `\u{1F4DE} Provisioned CallRail line for "${prospect.name}"`,
       message: `Real tracking number: ${phoneNumber}
-Forwarding to: ${operatorPhone}
-Auto-provisioned by autopilot. The next cycle will build the site.`,
-      metadata: { targetId: target.id, phoneNumber, forwardTo: operatorPhone, source: "autopilot" }
+Forwarding to: ${prospect.phone}
+Auto-provisioned by autopilot. Next cycle will build the site.`,
+      metadata: { targetId: prospect.targetId, prospectId: prospect.id, phoneNumber, forwardTo: prospect.phone, source: "autopilot" }
     });
     log.push(
-      `\u{1F4DE} CallRail tracker provisioned: ${phoneNumber}. Next cycle will build site.`,
+      `\u{1F4DE} CallRail tracker provisioned: ${phoneNumber} forwarding to ${prospect.phone}.`,
       "success"
     );
     return true;
   } catch (err) {
     log.push(
-      `\u274C CallRail provisioning failed for "${target.city} ${target.niche}": ${err?.message || err}.`,
+      `\u274C CallRail provisioning failed for "${prospect.name}": ${err?.message || err}.`,
       "warn"
     );
     return true;
@@ -1641,41 +1623,28 @@ async function notifyOncePerDay(targetId, key, partial) {
   });
 }
 async function tryBuildSite(log) {
-  const targets = await getTargets();
   const prospects = await getProspects();
-  const sites = await getSites();
-  const numbers = await getNumbers();
-  const target = targets.find((t) => {
-    const hasProspects = prospects.some((p) => p.targetId === t.id);
-    const hasSite = sites.some((s) => s.targetId === t.id);
-    return hasProspects && !hasSite;
-  });
-  if (!target) return null;
-  const activeLine = numbers.find(
-    (n) => n.friendlyName?.toLowerCase().includes(target.city.toLowerCase()) && n.friendlyName?.toLowerCase().includes(target.niche.toLowerCase())
+  const prospect = prospects.find(
+    (p) => p.phone && p.email && p.trackingNumber && !p.siteUrl && (p.pitchStatus === "Scraped" || p.pitchStatus === "Pitched")
   );
-  if (!activeLine) {
-    log.push(
-      `\u23F3 No CallRail tracking line yet for "${target.city} ${target.niche}". Waiting for tryProvisionTrackingLine to provision one.`,
-      "info"
-    );
-    return null;
-  }
+  if (!prospect) return false;
   log.push(
-    `\u{1F3D7}\uFE0F AI SITE BUILDER: Compiling SEO-optimized landing page for "${target.niche}" in "${target.city}"...`,
+    `\u{1F3D7}\uFE0F AI SITE BUILDER: Compiling SEO-optimized landing page for "${prospect.name}" in "${prospect.city}"...`,
     "info"
   );
   try {
+    const whisperMessage = `Call from Rank & Rent ${prospect.city} ${prospect.niche} Leads.`;
     const generated = await generateLandingPage(
-      target.niche,
-      target.city,
-      activeLine.phoneNumber,
-      activeLine.whisperMessage
+      prospect.niche,
+      prospect.city,
+      prospect.trackingNumber,
+      whisperMessage
     );
-    generated.targetId = target.id;
+    generated.targetId = prospect.targetId;
+    let deploymentUrl = "";
     if (process.env.VERCEL_API_KEY) {
       try {
-        const cleanName = `${target.city.toLowerCase()}-${target.niche.toLowerCase()}-${Date.now().toString().slice(-4)}`.replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+        const cleanName = `${prospect.city.toLowerCase()}-${prospect.niche.toLowerCase()}-${prospect.name.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 10)}-${Date.now().toString().slice(-4)}`.replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
         const vercelRes = await fetch("https://api.vercel.com/v13/deployments", {
           method: "POST",
           headers: {
@@ -1695,35 +1664,41 @@ async function tryBuildSite(log) {
           if (data?.url) {
             generated.domainName = data.url;
             generated.deploymentUrl = data.url;
+            deploymentUrl = data.url;
           }
+        } else {
+          const errText = await vercelRes.text();
+          log.push(`\u26A0\uFE0F Vercel deployment error details: ${errText}`, "warn");
         }
       } catch (vErr) {
-        log.push(`\u26A0\uFE0F Vercel deploy failed: ${vErr?.message || vErr}. Site saved without deploy URL.`, "warn");
+        log.push(`\u26A0\uFE0F Vercel deploy failed: ${vErr?.message || vErr}.`, "warn");
       }
     }
+    if (!deploymentUrl) {
+      deploymentUrl = `${prospect.city.toLowerCase()}-${prospect.niche.toLowerCase()}-${prospect.id.slice(-4)}.vercel.app`;
+      generated.domainName = deploymentUrl;
+      generated.deploymentUrl = deploymentUrl;
+    }
     await saveSite(generated);
-    target.status = "site_created";
-    await saveTarget(target);
+    prospect.siteUrl = deploymentUrl.startsWith("http") ? deploymentUrl : `https://${deploymentUrl}`;
+    await saveProspect(prospect);
     log.push(
-      `\u{1F389} Landing page generated${generated.deploymentUrl ? " and deployed to " + generated.deploymentUrl : ""}.`,
+      `\u{1F389} Landing page generated and deployed to ${prospect.siteUrl} for "${prospect.name}".`,
       "success"
     );
-    return { target, site: generated };
+    return true;
   } catch (err) {
-    log.push(`\u274C Site generation failed: ${err?.message || err}.`, "warn");
-    return null;
+    log.push(`\u274C Site generation failed for "${prospect.name}": ${err?.message || err}.`, "warn");
+    return true;
   }
 }
 async function trySendTrialEmail(log) {
   const prospects = await getProspects();
-  const sites = await getSites();
   const prospect = prospects.find(
-    (p) => !p.trialEmailSent && p.pitchStatus !== "Disqualified" && sites.some((s) => s.targetId === p.targetId)
+    (p) => p.siteUrl && !p.trialEmailSent && (p.pitchStatus === "Scraped" || p.pitchStatus === "Pitched")
   );
   if (!prospect) return false;
-  const site = sites.find((s) => s.targetId === prospect.targetId);
-  if (!site) return false;
-  const siteUrl = site.deploymentUrl || site.domainName || "";
+  const siteUrl = prospect.siteUrl;
   log.push(
     `\u{1F4E7} Generating trial offer email for "${prospect.name}" \u2192 ${siteUrl}...`,
     "info"
@@ -1739,7 +1714,7 @@ async function trySendTrialEmail(log) {
     prospect.trialEmailSent = true;
     prospect.pitchStatus = "Trial";
     await saveProspect(prospect);
-    log.push(`\u{1F4E7} Trial offer queued for "${prospect.name}".`, "success");
+    log.push(`\u{1F4E7} Trial offer email sent for "${prospect.name}".`, "success");
     return true;
   } catch (err) {
     log.push(`\u274C Trial email failed for "${prospect.name}": ${err?.message || err}.`, "warn");
@@ -1751,22 +1726,16 @@ async function tryAutoSubscribeOne(log) {
   if (!settings.isAutoSubscribeOn || !isStripeLive()) return false;
   const prospects = await getProspects();
   const sites = await getSites();
-  const numbers = await getNumbers();
   const prospect = prospects.find(
-    (p) => p.stripeCustomerId && p.stripeCustomerId !== "failed" && !p.stripeSubscriptionId && p.pitchStatus === "Trial" && p.email && sites.some((s) => s.targetId === p.targetId)
+    (p) => p.stripeCustomerId && p.stripeCustomerId !== "failed" && !p.stripeSubscriptionId && p.pitchStatus === "Trial" && p.siteUrl
   );
   if (!prospect) return false;
-  const site = sites.find((s) => s.targetId === prospect.targetId);
-  const hasLine = numbers.some(
-    (n) => n.friendlyName?.toLowerCase().includes(prospect.city.toLowerCase()) || n.friendlyName?.toLowerCase().includes(prospect.niche.toLowerCase())
-  ) || numbers.length > 0;
-  if (!hasLine) {
-    log.push(
-      `\u23F3 Cannot auto-subscribe "${prospect.name}": waiting for tracking line to be provisioned.`,
-      "info"
-    );
-    return false;
-  }
+  const site = sites.find((s) => s.targetId === prospect.targetId) || {
+    id: `site-${Date.now()}`,
+    domainName: prospect.siteUrl,
+    niche: prospect.niche,
+    city: prospect.city
+  };
   log.push(
     `\u{1F4B3} AUTO-SUBSCRIBE: Creating Stripe subscription for "${prospect.name}"...`,
     "process"
@@ -1862,6 +1831,15 @@ async function runAutopilotCycle() {
           `Scraped ${scrapeResult.newLeadCount} new leads for ${scrapeResult.target.niche} in ${scrapeResult.target.city}.`
         );
       }
+      const subscribed = await tryAutoSubscribeOne(log);
+      if (subscribed) {
+        return finish(
+          log,
+          start,
+          "auto_subscribe",
+          "Auto-subscribed a trial lead on Stripe."
+        );
+      }
       const stripeCreated = await tryCreateStripeCustomerOne(log);
       if (stripeCreated) {
         return finish(
@@ -1869,33 +1847,6 @@ async function runAutopilotCycle() {
           start,
           "create_stripe_customer",
           "Created Stripe customer for a lead."
-        );
-      }
-      const pitched = await tryPitchOne(log);
-      if (pitched) {
-        return finish(
-          log,
-          start,
-          "pitch_lead",
-          "Generated outreach pitch for a lead."
-        );
-      }
-      const lineProvisioned = await tryProvisionTrackingLine(log);
-      if (lineProvisioned) {
-        return finish(
-          log,
-          start,
-          "provision_line",
-          "Provisioned (or reported missing prereqs for) a CallRail tracking line."
-        );
-      }
-      const siteResult = await tryBuildSite(log);
-      if (siteResult) {
-        return finish(
-          log,
-          start,
-          "build_site",
-          `Built landing page for ${siteResult.target.niche} in ${siteResult.target.city}.`
         );
       }
       const trialSent = await trySendTrialEmail(log);
@@ -1907,13 +1858,31 @@ async function runAutopilotCycle() {
           "Queued trial offer email."
         );
       }
-      const subscribed = await tryAutoSubscribeOne(log);
-      if (subscribed) {
+      const siteResult = await tryBuildSite(log);
+      if (siteResult) {
         return finish(
           log,
           start,
-          "auto_subscribe",
-          "Auto-subscribed a trial lead on Stripe."
+          "build_site",
+          "Built landing page for a lead."
+        );
+      }
+      const lineProvisioned = await tryProvisionTrackingLine(log);
+      if (lineProvisioned) {
+        return finish(
+          log,
+          start,
+          "provision_line",
+          "Provisioned CallRail tracking line for a lead."
+        );
+      }
+      const pitched = await tryPitchOne(log);
+      if (pitched) {
+        return finish(
+          log,
+          start,
+          "pitch_lead",
+          "Generated outreach pitch for a lead."
         );
       }
       log.push("No actionable tasks found. All targets are healthy.", "info");

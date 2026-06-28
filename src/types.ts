@@ -49,6 +49,8 @@ export interface ScrapedLead {
   trialEmailSent?: boolean;
   email?: string;
   notes?: string;
+  trackingNumber?: string;
+  siteUrl?: string;
   // Stripe auto-subscription fields
   stripeCustomerId?: string;
   stripeSubscriptionId?: string;
