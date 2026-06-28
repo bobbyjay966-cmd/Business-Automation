@@ -634,32 +634,35 @@ function cleanAndParseJson(text) {
   }
   return JSON.parse(cleaned);
 }
-var NVIDIA_BASE_URL = process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1";
-var NVIDIA_MODEL = process.env.NVIDIA_MODEL || "minimaxai/minimax-m3";
+var OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+var OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "meta-llama/llama-3.3-70b-instruct";
 async function callLlm(prompt, jsonMode = true) {
-  const apiKey = process.env.NVIDIA_API_KEY;
+  const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) {
     throw new Error(
-      "NVIDIA_API_KEY is not set. Add it to your .env file.\nGet a free key with credits at https://build.nvidia.com."
+      "OPENROUTER_API_KEY is not set. Add it to your .env file.\nGet a key at https://openrouter.ai."
     );
   }
-  const targetUrl = `${NVIDIA_BASE_URL.replace(/\/$/, "")}/chat/completions`;
+  const targetUrl = `${OPENROUTER_BASE_URL.replace(/\/$/, "")}/chat/completions`;
   console.log(
-    `[LLM:NVIDIA] Calling ${targetUrl} (model=${NVIDIA_MODEL})`
+    `[LLM:OpenRouter] Calling ${targetUrl} (model=${OPENROUTER_MODEL})`
   );
   const start = Date.now();
   const response = await fetch(targetUrl, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://railway.app",
+      "X-Title": "Rank & Rent Hub"
     },
     body: JSON.stringify({
-      model: NVIDIA_MODEL,
+      model: OPENROUTER_MODEL,
       messages: jsonMode ? [
         { role: "system", content: "You must return a valid json object." },
         { role: "user", content: prompt }
       ] : [{ role: "user", content: prompt }],
+      response_format: jsonMode ? { type: "json_object" } : void 0,
       temperature: 1,
       top_p: 0.95,
       max_tokens: 8192
@@ -1170,31 +1173,31 @@ function formatLlmError(err) {
   if (httpMatch) {
     const status = httpMatch[1];
     if (status === "401" || status === "403") {
-      return `NVIDIA LLM returned HTTP ${status} (unauthorized).
-Check that NVIDIA_API_KEY is valid and not expired.
-Get a fresh key at https://build.nvidia.com.`;
+      return `OpenRouter returned HTTP ${status} (unauthorized).
+Check that OPENROUTER_API_KEY is valid and has sufficient credits.
+Get or check your key at https://openrouter.ai.`;
     }
     if (status === "429") {
-      return `NVIDIA LLM returned HTTP 429 (rate limited).
-You've exceeded your NVIDIA API quota. Wait a few minutes or upgrade your plan.`;
+      return `OpenRouter returned HTTP 429 (rate limited).
+You've exceeded your OpenRouter quota. Check your balance at openrouter.ai/keys.`;
     }
     if (status.startsWith("5")) {
-      return `NVIDIA LLM returned HTTP ${status} (server error).
-NVIDIA's API may be experiencing an outage.`;
+      return `OpenRouter returned HTTP ${status} (server error).
+OpenRouter or the upstream provider may be experiencing an outage.`;
     }
-    return `NVIDIA LLM returned HTTP ${status}: ${rawMsg.slice(0, 300)}`;
+    return `OpenRouter returned HTTP ${status}: ${rawMsg.slice(0, 300)}`;
   }
   if (lower.includes("econnrefused") || lower.includes("enotfound") || lower.includes("failed to fetch") || lower.includes("fetch failed")) {
-    return `Could not reach NVIDIA API at ${NVIDIA_BASE_URL}.
+    return `Could not reach OpenRouter API at ${OPENROUTER_BASE_URL}.
 Check your internet connection.`;
   }
   if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) {
-    return `NVIDIA LLM request timed out. MiniMax-M3 may be under heavy load.
+    return `OpenRouter request timed out. The model may be under heavy load.
 Try again in a few seconds.`;
   }
   if (lower.includes("no message content")) {
-    return `NVIDIA LLM returned a response with no message content.
-This is unexpected \u2014 try again or check the NVIDIA API status.`;
+    return `OpenRouter returned a response with no message content.
+This is unexpected \u2014 try again or check the OpenRouter API status.`;
   }
   return `NVIDIA LLM error: ${rawMsg.slice(0, 500)}`;
 }
