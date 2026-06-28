@@ -202,50 +202,14 @@ If the dashboard says "Stripe did NOT email the invoice", the operator notificat
                                          └──────────────┘
 ```
 
-## Local LLM setup (fallback)
-
-When `NVIDIA_API_KEY` is NOT set, the app falls back to a local LLM. Bring your own model via any server that speaks the OpenAI `/chat/completions` protocol (Ollama, LM Studio, vLLM, llama.cpp server, text-generation-webui, etc.).
-
-**Ollama (recommended, easiest)**
-
-```bash
-# 1. Install: https://ollama.com/download
-# 2. Pull a model that supports JSON output mode
-ollama pull llama3.1
-# 3. Start the server (it runs on http://localhost:11434 by default)
-ollama serve
-# 4. Set in your .env
-LOCAL_LLM_URL=http://localhost:11434
-LOCAL_LLM_MODEL=llama3.1
-```
-
-**LM Studio**
-
-1. Download from https://lmstudio.ai and open it.
-2. In the **Search** tab, download any model that supports JSON mode (e.g. `llama-3.1`).
-3. In the **Developer** tab, start the local server (default port `1234`).
-4. Set in your .env:
-
-```
-LOCAL_LLM_URL=http://localhost:1234/v1
-LOCAL_LLM_MODEL=llama-3.1
-```
-
-The model **must** support JSON output mode (`response_format: json_object`).
-Recommended: `llama3.1`, `llama3.2`, `qwen2.5`, `mistral`. Smaller variants
-(3B / 8B) work fine for the JSON-shaped prompts in this app and respond
-faster.
-
 ## Environment variables
 
 See `.env.example` for the full list. The most important ones:
 
 | Var | Required for | Notes |
 |-----|--------------|-------|
-| `NVIDIA_API_KEY` | All AI features (primary) | Get free credits at build.nvidia.com |
+| `NVIDIA_API_KEY` | All AI features | Get free credits at build.nvidia.com |
 | `NVIDIA_MODEL` | AI features (optional) | Default: `meta/llama-3.3-70b-instruct` |
-| `LOCAL_LLM_URL` | AI fallback (no NVIDIA key) | OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, …) |
-| `LOCAL_LLM_MODEL` | AI fallback | A model already loaded by your local server |
 | `UPSTASH_REDIS_REST_URL` | Vercel deploys | Free tier at upstash.com |
 | `STRIPE_SECRET_KEY` | Live billing | `sk_test_...` or `sk_live_...` |
 | `STRIPE_WEBHOOK_SECRET` | Webhook signature verification | `whsec_...` from Stripe dashboard |

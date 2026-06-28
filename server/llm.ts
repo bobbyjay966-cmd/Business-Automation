@@ -19,10 +19,10 @@ function cleanAndParseJson(text: string): any {
 }
 
 // ----------------------------------------------------------------
-// NVIDIA AI (primary provider when NVIDIA_API_KEY is set).
-// Uses the OpenAI-compatible /chat/completions protocol. The 70B
-// model supports json_object natively so no retry ladder is needed.
-// Falls through to local LLM when NVIDIA_API_KEY is not configured.
+// NVIDIA AI — the ONLY LLM provider.
+// Uses the OpenAI-compatible /chat/completions protocol via
+// https://integrate.api.nvidia.com/v1. The 70B Llama 3.3 model
+// supports json_object natively so no retry ladder is needed.
 // ----------------------------------------------------------------
 
 const NVIDIA_BASE_URL =
@@ -30,10 +30,13 @@ const NVIDIA_BASE_URL =
 const NVIDIA_MODEL =
   process.env.NVIDIA_MODEL || "meta/llama-3.3-70b-instruct";
 
-async function callNvidiaLlm(prompt: string, jsonMode: boolean): Promise<string> {
+async function callLlm(prompt: string, jsonMode = true): Promise<string> {
   const apiKey = process.env.NVIDIA_API_KEY;
   if (!apiKey) {
-    throw new Error("NVIDIA_API_KEY is set but empty — check your .env file.");
+    throw new Error(
+      "NVIDIA_API_KEY is not set. Add it to your .env file.\n" +
+      "Get a free key with credits at https://build.nvidia.com.",
+    );
   }
 
   const targetUrl = `${NVIDIA_BASE_URL.replace(/\/$/, "")}/chat/completions`;
@@ -78,7 +81,7 @@ async function callNvidiaLlm(prompt: string, jsonMode: boolean): Promise<string>
   const content = data.choices?.[0]?.message?.content;
   if (content) {
     console.log(
-      `[LLM:NVIDIA] ✓ succeeded in ${Date.now() - start}ms (${content.length} chars)`,
+      `[LLM:NVIDIA] OK in ${Date.now() - start}ms (${content.length} chars)`,
     );
     return content;
   }
@@ -90,158 +93,6 @@ async function callNvidiaLlm(prompt: string, jsonMode: boolean): Promise<string>
       ),
     ),
   );
-}
-
-// Local LLM (Ollama, LM Studio, vLLM, llama.cpp — any server that speaks
-// the OpenAI /chat/completions protocol). Used as fallback when
-// NVIDIA_API_KEY is not configured. Bring your own model and point
-// LOCAL_LLM_URL at its endpoint.
-async function callLlm(prompt: string, jsonMode = true): Promise<string> {
-  // NVIDIA takes priority when configured; there is no fallback
-  // from NVIDIA → local because a configured key means the operator
-  // explicitly chose NVIDIA and wants errors visible.
-  if (process.env.NVIDIA_API_KEY) {
-    return callNvidiaLlm(prompt, jsonMode);
-  }
-
-  const localUrl = process.env.LOCAL_LLM_URL;
-  if (!localUrl || localUrl.trim() === "") {
-    throw new Error(
-      `Neither NVIDIA_API_KEY nor LOCAL_LLM_URL is set. Configure one in .env:\n` +
-        `  • NVIDIA:  NVIDIA_API_KEY=nvapi-... (cloud, recommended)\n` +
-        `  • Ollama:  LOCAL_LLM_URL=http://localhost:11434\n` +
-        `  • LM Studio: LOCAL_LLM_URL=http://localhost:1234/v1\n` +
-        `Then set LOCAL_LLM_MODEL to a model you have already pulled/loaded.`,
-    );
-  }
-
-  const model = process.env.LOCAL_LLM_MODEL || "llama3.1";
-  const targetUrl = localUrl.endsWith("/chat/completions")
-    ? localUrl
-    : `${localUrl.replace(/\/$/, "")}/chat/completions`;
-
-  console.log(`[LLM] Calling local LLM at: ${targetUrl} (model=${model})`);
-
-  // Some local LLM servers (newer Ollama, LM Studio, vLLM builds) have
-  // dropped support for `response_format: { type: "json_object" }` in
-  // favor of the newer `json_schema` variant. We try:
-  //   1. `json_object` (widest compatibility)
-  //   2. `json_schema` with a permissive schema (strict=false) for servers
-  //      that require the newer format
-  //   3. No response_format at all, with a strengthened system prompt
-  // Each step fires ONLY when the previous step returned HTTP 400 with
-  // "response_format.type" in the error body.
-  const systemMessages = jsonMode
-    ? [
-        { role: "system", content: "You must return a valid json object." },
-        { role: "user", content: prompt },
-      ]
-    : [{ role: "user", content: prompt }];
-
-  // Only jsonMode calls need the retry ladder; plain calls run once.
-  // LOCAL_LLM_RESPONSE_FORMAT pins a single strategy so you can skip the
-  // retry ladder entirely (e.g. set to "json_schema" if your server always
-  // rejects json_object). Valid: json_object, json_schema, no_response_format
-  // (or "none" as a shorthand for no_response_format).
-  const defaultStrategies = (["json_object", "json_schema", "no_response_format"] as const);
-  const rawPin = (process.env.LOCAL_LLM_RESPONSE_FORMAT || "").toLowerCase();
-  const pinned = rawPin === "none" ? "no_response_format" : rawPin;
-  const strategies: readonly string[] = jsonMode
-    ? (pinned && (defaultStrategies as readonly string[]).includes(pinned)
-        ? [pinned]
-        : defaultStrategies)
-    : (["plain"] as const);
-
-  for (const attemptDescr of strategies) {
-    const useJsonObject = attemptDescr === "json_object";
-    const useJsonSchema = attemptDescr === "json_schema";
-    const attemptStart = Date.now();
-    console.log(`[LLM] Attempt: ${attemptDescr}${useJsonObject || useJsonSchema ? '' : strategies.length > 1 ? ' (fallback)' : ''}`);
-    let response: Response;
-    try {
-      response = await fetch(targetUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model,
-          messages: useJsonObject
-            ? systemMessages
-            : jsonMode
-              ? [
-                  {
-                    role: "system",
-                    content:
-                      "You must return ONLY a valid JSON object — no markdown fences, no " +
-                      "explanatory text, nothing but the raw JSON. Every response you give " +
-                      "must be parseable by JSON.parse().",
-                  },
-                  { role: "user", content: prompt },
-                ]
-              : [{ role: "user", content: prompt }],
-          response_format: useJsonObject
-            ? { type: "json_object" }
-            : useJsonSchema
-              ? {
-                  type: "json_schema",
-                  json_schema: {
-                    name: "response",
-                    strict: false,
-                    schema: { type: "object" },
-                  },
-                }
-              : undefined,
-          temperature: 0.7,
-        }),
-      });
-    } catch (err: any) {
-      throw new Error(formatLlmError(err));
-    }
-
-    if (response.ok) {
-      const data = await response.json();
-      const content = data.choices?.[0]?.message?.content;
-      if (content) {
-        console.log(
-          `[LLM] ✓ ${attemptDescr} succeeded in ${Date.now() - attemptStart}ms ` +
-          `(${content.length} chars)`,
-        );
-        return content;
-      }
-      throw new Error(
-        formatLlmError(
-          new Error(
-            `Local LLM returned HTTP 200 but no message content: ${JSON.stringify(data).slice(0, 300)}`,
-          ),
-        ),
-      );
-    }
-
-    // If the server rejected a structured output format, retry with the
-    // next strategy in the ladder. A 400 or 422 on json_object / json_schema
-    // almost always means the model/server doesn't support that feature,
-    // so we fall through to the next attempt.
-    const isStructuredOutputAttempt = useJsonObject || useJsonSchema;
-    const isRecoverableStatus =
-      response.status === 400 || response.status === 422;
-    if (isRecoverableStatus && isStructuredOutputAttempt) {
-      const errorText = await response.text();
-      console.log(
-        `[LLM] Server rejected ${attemptDescr} (HTTP ${response.status}) — retrying with next strategy.`,
-      );
-      continue;
-    }
-
-    // Non-recoverable error, or we're already on the last strategy. Fail.
-    const errorText = await response.text();
-    throw new Error(
-      formatLlmError(new Error(`Local LLM HTTP ${response.status}: ${errorText.slice(0, 500)}`)),
-    );
-  }
-
-  // Should be unreachable; the loop always either returns or throws.
-  throw new Error(`Local LLM: exhausted retry attempts.`);
 }
 
 // Analyze market (keywords & competitors) grounded with real search data
@@ -450,160 +301,68 @@ Return ONLY a valid JSON object matching these fields.`;
   };
 }
 
-// Error formatting helper — translates raw fetch / HTTP / model errors into
-// actionable setup instructions for the local LLM (Ollama / LM Studio /
-// vLLM / llama.cpp server / etc.).
+// Error formatting helper for NVIDIA LLM errors.
 export function formatLlmError(err: any): string {
   if (!err) return "An unknown error occurred.";
   const rawMsg = err.message || String(err);
   const lower = rawMsg.toLowerCase();
-  const localUrl = process.env.LOCAL_LLM_URL || "http://localhost:11434";
-  const model = process.env.LOCAL_LLM_MODEL || "llama3.1";
 
-  // NVIDIA-specific errors (when NVIDIA_API_KEY is configured)
-  if (process.env.NVIDIA_API_KEY && (lower.includes("nvidia") || lower.includes("nvapi"))) {
-    const httpMatch = rawMsg.match(/HTTP\s+(\d{3})/i);
-    if (httpMatch) {
-      const status = httpMatch[1];
-      if (status === "401" || status === "403") {
-        return (
-          `NVIDIA LLM returned HTTP ${status} (unauthorized).\n` +
-          `Check that NVIDIA_API_KEY in your .env is valid and not expired.\n` +
-          `Get a fresh key at https://build.nvidia.com.`
-        );
-      }
-      if (status === "429") {
-        return (
-          `NVIDIA LLM returned HTTP 429 (rate limited).\n` +
-          `You've exceeded your NVIDIA API quota. Wait a few minutes or upgrade your plan.`
-        );
-      }
-      if (status.startsWith("5")) {
-        return (
-          `NVIDIA LLM returned HTTP ${status} (server error).\n` +
-          `NVIDIA's API may be experiencing an outage. Check status at https://status.nvidia.com.`
-        );
-      }
-      return `NVIDIA LLM returned HTTP ${status}: ${rawMsg.slice(0, 300)}`;
-    }
-    // Connection-level failures to NVIDIA
-    if (
-      lower.includes("econnrefused") ||
-      lower.includes("enotfound") ||
-      lower.includes("failed to fetch") ||
-      lower.includes("fetch failed")
-    ) {
-      return (
-        `Could not reach NVIDIA API at ${NVIDIA_BASE_URL}.\n` +
-        `Check your internet connection and that the NVIDIA API is not blocked by a firewall.`
-      );
-    }
-    // Timeout
-    if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) {
-      return (
-        `NVIDIA LLM request timed out. The 70B model may be under heavy load.\n` +
-        `Try again in a few seconds, or switch to a local LLM by removing NVIDIA_API_KEY.`
-      );
-    }
-    return `NVIDIA LLM error: ${rawMsg.slice(0, 500)}`;
-  }
-
-  // Connection-level failures (server not running, wrong port, DNS, firewall).
-  if (
-    lower.includes("econnrefused") ||
-    lower.includes("enotfound") ||
-    lower.includes("eai_again") ||
-    lower.includes("ehostunreach") ||
-    lower.includes("enetunreach") ||
-    lower.includes("connection refused") ||
-    lower.includes("failed to fetch") ||
-    lower.includes("fetch failed") ||
-    lower.includes("network request failed") ||
-    lower.includes("getaddrinfo")
-  ) {
-    return (
-      `Could not reach the local LLM at ${localUrl}.\n` +
-      `Make sure your local LLM server is running:\n` +
-      `  • Ollama:    run \`ollama serve\` (default URL: http://localhost:11434)\n` +
-      `  • LM Studio: enable the local server in the Developer tab (default URL: http://localhost:1234/v1)\n` +
-      `Then set LOCAL_LLM_URL in your .env to match.`
-    );
-  }
-
-  // Model not installed / wrong name.
-  if (
-    (lower.includes("model") &&
-      (lower.includes("not found") ||
-        lower.includes("does not exist") ||
-        lower.includes("unknown model") ||
-        lower.includes("no such model"))) ||
-    (lower.includes("404") && lower.includes("model"))
-  ) {
-    return (
-      `Local LLM could not find model "${model}".\n` +
-      `Pull it first (Ollama: \`ollama pull ${model}\`, LM Studio: download from the Discover tab), ` +
-      `or set LOCAL_LLM_MODEL in your .env to a model that is already installed.`
-    );
-  }
-
-  // Timeout / abort — usually a slow model or a huge prompt.
-  if (
-    lower.includes("timeout") ||
-    lower.includes("timed out") ||
-    lower.includes("aborted") ||
-    lower.includes("abort") ||
-    lower.includes("etimedout")
-  ) {
-    return (
-      `Local LLM request timed out. The model may still be loading, or the prompt is too large.\n` +
-      `Try a smaller/faster model (e.g. \`ollama pull llama3.2:3b\`), or shorten the prompt.`
-    );
-  }
-
-  // HTTP status from the local server.
+  // HTTP status codes from NVIDIA
   const httpMatch = rawMsg.match(/HTTP\s+(\d{3})/i);
   if (httpMatch) {
     const status = httpMatch[1];
-    if (status === "404") {
-      return (
-        `Local LLM returned HTTP 404. Check that LOCAL_LLM_URL points to a valid ` +
-        `\`/chat/completions\` endpoint and that the model in LOCAL_LLM_MODEL is installed.`
-      );
-    }
     if (status === "401" || status === "403") {
       return (
-        `Local LLM returned HTTP ${status}. The local server requires authentication — ` +
-        `either disable auth in the local LLM settings, or include the API key in the URL ` +
-        `(e.g. \`http://localhost:1234/v1\` with an \`Authorization: Bearer ...\` header).`
+        `NVIDIA LLM returned HTTP ${status} (unauthorized).\n` +
+        `Check that NVIDIA_API_KEY is valid and not expired.\n` +
+        `Get a fresh key at https://build.nvidia.com.`
       );
     }
-    if (status === "422") {
+    if (status === "429") {
       return (
-        `Local LLM returned HTTP 422 (Unprocessable Entity). This usually means the prompt ` +
-        `or the \`response_format: json_object\` flag is not supported by the model. ` +
-        `Try a model that supports JSON mode (e.g. llama3.1, qwen2.5, mistral).`
+        `NVIDIA LLM returned HTTP 429 (rate limited).\n` +
+        `You've exceeded your NVIDIA API quota. Wait a few minutes or upgrade your plan.`
       );
     }
     if (status.startsWith("5")) {
       return (
-        `Local LLM returned HTTP ${status} (server error). The model may have crashed; ` +
-        `try a different model, or restart the local LLM server.`
+        `NVIDIA LLM returned HTTP ${status} (server error).\n` +
+        `NVIDIA's API may be experiencing an outage.`
       );
     }
-    return `Local LLM returned HTTP ${status}: ${rawMsg.slice(0, 200)}`;
+    return `NVIDIA LLM returned HTTP ${status}: ${rawMsg.slice(0, 300)}`;
   }
 
-  // 200 OK but no content — usually a JSON-mode-incompatible model.
-  if (lower.includes("no message content")) {
+  // Connection-level failures
+  if (
+    lower.includes("econnrefused") ||
+    lower.includes("enotfound") ||
+    lower.includes("failed to fetch") ||
+    lower.includes("fetch failed")
+  ) {
     return (
-      `Local LLM returned a response with no message content.\n` +
-      `This often happens when the model does not support \`response_format: json_object\`. ` +
-      `Use a model that supports JSON mode (e.g. llama3.1, qwen2.5, mistral) or a recent Ollama version.`
+      `Could not reach NVIDIA API at ${NVIDIA_BASE_URL}.\n` +
+      `Check your internet connection.`
     );
   }
 
-  // Generic fallback — show the raw message so the operator can diagnose.
-  return `Local LLM error: ${rawMsg.slice(0, 500)}`;
+  // Timeout
+  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) {
+    return (
+      `NVIDIA LLM request timed out. The 70B model may be under heavy load.\n` +
+      `Try again in a few seconds.`
+    );
+  }
+
+  // 200 OK but no content
+  if (lower.includes("no message content")) {
+    return (
+      `NVIDIA LLM returned a response with no message content.\n` +
+      `This is unexpected — try again or check the NVIDIA API status.`
+    );
+  }
+
+  return `NVIDIA LLM error: ${rawMsg.slice(0, 500)}`;
 }
 
 
