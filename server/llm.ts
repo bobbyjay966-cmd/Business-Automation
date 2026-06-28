@@ -9,7 +9,15 @@ import {
 // Robust JSON cleaning and parsing helper
 function cleanAndParseJson(text: string): any {
   let cleaned = text.trim();
-  // Remove markdown code block wrappers if the model returned them
+  
+  // Extract content between the first '{' and the last '}'
+  const startIdx = cleaned.indexOf('{');
+  const endIdx = cleaned.lastIndexOf('}');
+  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+    cleaned = cleaned.slice(startIdx, endIdx + 1);
+  }
+
+  // Remove markdown code block wrappers if any remain
   if (cleaned.startsWith("```")) {
     cleaned = cleaned.replace(/^```(?:json)?\n?/i, "");
     cleaned = cleaned.replace(/\n?```$/i, "");
@@ -59,7 +67,6 @@ async function callLlm(prompt: string, jsonMode = true): Promise<string> {
             { role: "user", content: prompt },
           ]
         : [{ role: "user", content: prompt }],
-      response_format: jsonMode ? { type: "json_object" } : undefined,
       temperature: 1.00,
       top_p: 0.95,
       max_tokens: 8192,

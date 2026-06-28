@@ -622,6 +622,11 @@ var STREET_NAMES = [
 // server/llm.ts
 function cleanAndParseJson(text) {
   let cleaned = text.trim();
+  const startIdx = cleaned.indexOf("{");
+  const endIdx = cleaned.lastIndexOf("}");
+  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+    cleaned = cleaned.slice(startIdx, endIdx + 1);
+  }
   if (cleaned.startsWith("```")) {
     cleaned = cleaned.replace(/^```(?:json)?\n?/i, "");
     cleaned = cleaned.replace(/\n?```$/i, "");
@@ -655,7 +660,6 @@ async function callLlm(prompt, jsonMode = true) {
         { role: "system", content: "You must return a valid json object." },
         { role: "user", content: prompt }
       ] : [{ role: "user", content: prompt }],
-      response_format: jsonMode ? { type: "json_object" } : void 0,
       temperature: 1,
       top_p: 0.95,
       max_tokens: 8192
