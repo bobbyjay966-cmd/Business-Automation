@@ -28,7 +28,7 @@ function cleanAndParseJson(text: string): any {
 const NVIDIA_BASE_URL =
   process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1";
 const NVIDIA_MODEL =
-  process.env.NVIDIA_MODEL || "deepseek-ai/deepseek-v4-pro";
+  process.env.NVIDIA_MODEL || "minimaxai/minimax-m3";
 
 async function callLlm(prompt: string, jsonMode = true): Promise<string> {
   const apiKey = process.env.NVIDIA_API_KEY;
@@ -60,10 +60,9 @@ async function callLlm(prompt: string, jsonMode = true): Promise<string> {
           ]
         : [{ role: "user", content: prompt }],
       response_format: jsonMode ? { type: "json_object" } : undefined,
-      temperature: 1,
+      temperature: 1.00,
       top_p: 0.95,
-      max_tokens: 16384,
-      chat_template_kwargs: { thinking: false },
+      max_tokens: 8192,
     }),
     signal: AbortSignal.timeout(40000),
   });
@@ -649,7 +648,7 @@ export function formatLlmError(err: any): string {
   // Timeout
   if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) {
     return (
-      `NVIDIA LLM request timed out. DeepSeek V4 Pro may be under heavy load.\n` +
+      `NVIDIA LLM request timed out. MiniMax-M3 may be under heavy load.\n` +
       `Try again in a few seconds.`
     );
   }

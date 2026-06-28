@@ -630,7 +630,7 @@ function cleanAndParseJson(text) {
   return JSON.parse(cleaned);
 }
 var NVIDIA_BASE_URL = process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1";
-var NVIDIA_MODEL = process.env.NVIDIA_MODEL || "deepseek-ai/deepseek-v4-pro";
+var NVIDIA_MODEL = process.env.NVIDIA_MODEL || "minimaxai/minimax-m3";
 async function callLlm(prompt, jsonMode = true) {
   const apiKey = process.env.NVIDIA_API_KEY;
   if (!apiKey) {
@@ -658,8 +658,7 @@ async function callLlm(prompt, jsonMode = true) {
       response_format: jsonMode ? { type: "json_object" } : void 0,
       temperature: 1,
       top_p: 0.95,
-      max_tokens: 16384,
-      chat_template_kwargs: { thinking: false }
+      max_tokens: 8192
     }),
     signal: AbortSignal.timeout(4e4)
   });
@@ -1186,7 +1185,7 @@ NVIDIA's API may be experiencing an outage.`;
 Check your internet connection.`;
   }
   if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) {
-    return `NVIDIA LLM request timed out. DeepSeek V4 Pro may be under heavy load.
+    return `NVIDIA LLM request timed out. MiniMax-M3 may be under heavy load.
 Try again in a few seconds.`;
   }
   if (lower.includes("no message content")) {

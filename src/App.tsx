@@ -327,7 +327,7 @@ export default function App() {
                 {/\b(econnrefused|enotfound|fetch failed|failed to fetch|connection refused|model.{0,30}(not found|does not exist|unknown model)|no such model|timed?\s?out|abort|etimedout|llm.{0,10}not\s?set|http\s?(401|403|404|422|429|500|502|503|504))\b/i.test(apiError) && (
                   <div className="text-[11px] text-amber-400/95 leading-relaxed mt-2 bg-amber-500/5 px-3.5 py-2.5 rounded-xl border border-amber-500/10 space-y-1.5">
                     <div>
-                      💡 <strong>NVIDIA AI API required:</strong> this app uses NVIDIA's cloud-hosted DeepSeek V4 Pro model. Configure your key in the <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">.env</code> file.
+                      💡 <strong>NVIDIA AI API required:</strong> this app uses NVIDIA's cloud-hosted MiniMax-M3 model. Configure your key in the <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">.env</code> file.
                     </div>
                     <ol className="list-decimal pl-5 space-y-1 marker:text-amber-500/70">
                       <li>
@@ -338,11 +338,11 @@ export default function App() {
                         Set <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">NVIDIA_API_KEY=nvapi-...</code> in your <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">.env</code> file.
                       </li>
                       <li>
-                        (Optional) The default model is <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">deepseek-ai/deepseek-v4-pro</code>. Override with <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">NVIDIA_MODEL</code> and <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">NVIDIA_BASE_URL</code>.
+                        (Optional) The default model is <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">minimaxai/minimax-m3</code>. Override with <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">NVIDIA_MODEL</code> and <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">NVIDIA_BASE_URL</code>.
                       </li>
                     </ol>
                     <div className="italic text-amber-300/90">
-                      The DeepSeek model supports native JSON mode (<code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">response_format: json_object</code>) for fast, reliable structured output.
+                      The MiniMax-M3 model supports native JSON mode (<code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">response_format: json_object</code>) for fast, reliable structured output.
                     </div>
                   </div>
                 )}
