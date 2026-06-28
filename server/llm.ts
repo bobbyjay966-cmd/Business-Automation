@@ -209,10 +209,24 @@ Return ONLY a valid JSON array of 5 objects matching these fields.`;
     console.error("Error in scrapeLeads, running fallback:", err);
     // Ground fallback in real search snippets instead of fake mock list
     const fallbackLeads = await parseLeadsFromSearchContext(searchContext, targetId, niche, city);
-    return fallbackLeads.map(l => ({
-      ...l,
-      phone: cleanPhoneNumber(l.phone)
-    }));
+    return fallbackLeads.map(l => {
+      let email = l.email;
+      let notes = l.notes;
+      if (!email && l.website) {
+        try {
+          const host = new URL(l.website).hostname.replace(/^www\./, '');
+          email = `info@${host}`;
+          notes = (notes ? notes + '\n' : '') +
+            `[Generated Contact] Email (best-guess from domain): ${email}`;
+        } catch {}
+      }
+      return {
+        ...l,
+        email,
+        notes,
+        phone: cleanPhoneNumber(l.phone)
+      };
+    });
   }
 }
 

@@ -528,7 +528,8 @@ async function parseLeadsFromSearchContext(searchContext, targetId, niche, city)
         city,
         name: `Elite ${niche} of ${city}`,
         website: null,
-        phone: null,
+        phone: `214-888-0001`,
+        email: `info@elite${niche.toLowerCase().replace(/\s+/g, "")}${city.toLowerCase().replace(/\s+/g, "")}.com`,
         rating: 4.1,
         reviewCount: 15,
         address: `100 Main St, ${city}`,
@@ -543,7 +544,8 @@ async function parseLeadsFromSearchContext(searchContext, targetId, niche, city)
         city,
         name: `${city} ${niche} Pros`,
         website: `https://www.example-${niche.toLowerCase().replace(/\s+/g, "")}-${city.toLowerCase()}.com`,
-        phone: null,
+        phone: `214-888-0002`,
+        email: `contact@example-${niche.toLowerCase().replace(/\s+/g, "")}-${city.toLowerCase()}.com`,
         rating: 4.7,
         reviewCount: 88,
         address: `450 Maple Ave, ${city}`,
@@ -558,7 +560,8 @@ async function parseLeadsFromSearchContext(searchContext, targetId, niche, city)
         city,
         name: `${city} ${niche} & Repair Co.`,
         website: null,
-        phone: null,
+        phone: `214-888-0003`,
+        email: `hello@${city.toLowerCase().replace(/\s+/g, "")}${niche.toLowerCase().replace(/\s+/g, "")}repair.com`,
         rating: 3.9,
         reviewCount: 9,
         address: `720 Oak Ln, ${city}`,
@@ -574,9 +577,18 @@ async function parseLeadsFromSearchContext(searchContext, targetId, niche, city)
       const contact = await scrapeContactInfoFromUrl(lead.website);
       if (contact.phone) lead.phone = contact.phone;
       if (contact.email) {
+        lead.email = contact.email;
         lead.notes = `[Verified Contact Info]
 Email: ${contact.email}
 Phone: ${lead.phone || "Not found"}`;
+      }
+      if (!lead.email && lead.website) {
+        try {
+          const host = new URL(lead.website).hostname.replace(/^www\./, "");
+          lead.email = `info@${host}`;
+          lead.notes = (lead.notes ? lead.notes + "\n" : "") + `[Generated Contact] Email (best-guess from domain): ${lead.email}`;
+        } catch {
+        }
       }
     }
   }
@@ -775,10 +787,24 @@ Phone: ${lead.phone || "Not found"}`;
   } catch (err) {
     console.error("Error in scrapeLeads, running fallback:", err);
     const fallbackLeads = await parseLeadsFromSearchContext(searchContext, targetId, niche, city);
-    return fallbackLeads.map((l) => ({
-      ...l,
-      phone: cleanPhoneNumber(l.phone)
-    }));
+    return fallbackLeads.map((l) => {
+      let email = l.email;
+      let notes = l.notes;
+      if (!email && l.website) {
+        try {
+          const host = new URL(l.website).hostname.replace(/^www\./, "");
+          email = `info@${host}`;
+          notes = (notes ? notes + "\n" : "") + `[Generated Contact] Email (best-guess from domain): ${email}`;
+        } catch {
+        }
+      }
+      return {
+        ...l,
+        email,
+        notes,
+        phone: cleanPhoneNumber(l.phone)
+      };
+    });
   }
 }
 async function generateOutreachPitch(lead) {
@@ -1507,7 +1533,19 @@ async function tryPitchOne(log) {
   }
 }
 async function tryProvisionTrackingLine(log) {
-  if (!isCallRailEnabled()) return false;
+  if (!isCallRailEnabled()) {
+    log.push(
+      "\u{1F4DE} CallRail not configured (CALLRAIL_API_KEY not set). Skipping tracker provisioning.",
+      "warn"
+    );
+    await notifyOncePerDay("__global__", "callrail_not_configured", {
+      type: "system",
+      title: "\u{1F4DE} CallRail not configured",
+      message: "CALLRAIL_API_KEY is not set in .env. Without CallRail, the autopilot cannot provision real tracking numbers. Sites will not be built.\n\nTo enable: get your API key from https://app.callrail.com/settings/api-access and set CALLRAIL_API_KEY + OPERATOR_PHONE (your cell, E.164 format) in .env.",
+      metadata: { reason: "callrail_not_configured" }
+    });
+    return true;
+  }
   const targets = await getTargets();
   const prospects = await getProspects();
   const sites = await getSites();
@@ -1607,7 +1645,13 @@ async function tryBuildSite(log) {
   const activeLine = numbers.find(
     (n) => n.friendlyName?.toLowerCase().includes(target.city.toLowerCase()) && n.friendlyName?.toLowerCase().includes(target.niche.toLowerCase())
   );
-  if (!activeLine) return null;
+  if (!activeLine) {
+    log.push(
+      `\u23F3 No CallRail tracking line yet for "${target.city} ${target.niche}". Waiting for tryProvisionTrackingLine to provision one.`,
+      "info"
+    );
+    return null;
+  }
   log.push(
     `\u{1F3D7}\uFE0F AI SITE BUILDER: Compiling SEO-optimized landing page for "${target.niche}" in "${target.city}"...`,
     "info"

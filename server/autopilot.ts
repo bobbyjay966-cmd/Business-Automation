@@ -488,7 +488,23 @@ async function tryPitchOne(
 async function tryProvisionTrackingLine(
   log: ReturnType<typeof makeLogBuffer>,
 ): Promise<boolean> {
-  if (!isCallRailEnabled()) return false;
+  if (!isCallRailEnabled()) {
+    log.push(
+      '📞 CallRail not configured (CALLRAIL_API_KEY not set). Skipping tracker provisioning.',
+      'warn',
+    );
+    await notifyOncePerDay('__global__', 'callrail_not_configured', {
+      type: 'system',
+      title: '📞 CallRail not configured',
+      message:
+        'CALLRAIL_API_KEY is not set in .env. Without CallRail, the autopilot cannot ' +
+        'provision real tracking numbers. Sites will not be built.\n\n' +
+        'To enable: get your API key from https://app.callrail.com/settings/api-access ' +
+        'and set CALLRAIL_API_KEY + OPERATOR_PHONE (your cell, E.164 format) in .env.',
+      metadata: { reason: 'callrail_not_configured' },
+    });
+    return true; // action taken (notification); cycle moves on
+  }
   const targets = await getTargets();
   const prospects = await getProspects();
   const sites = await getSites();
@@ -627,7 +643,16 @@ async function tryBuildSite(
       n.friendlyName?.toLowerCase().includes(target.city.toLowerCase()) &&
       n.friendlyName?.toLowerCase().includes(target.niche.toLowerCase()),
   );
-  if (!activeLine) return null; // tryProvisionTrackingLine picks it up next tick
+  // ALL forwarding numbers must come from CallRail. No placeholders.
+  // tryProvisionTrackingLine (priority 5) runs before this (priority 6),
+  // so on the next tick after provisioning, the line will be here.
+  if (!activeLine) {
+    log.push(
+      `⏳ No CallRail tracking line yet for "${target.city} ${target.niche}". Waiting for tryProvisionTrackingLine to provision one.`,
+      'info',
+    );
+    return null;
+  }
 
   log.push(
     `🏗️ AI SITE BUILDER: Compiling SEO-optimized landing page for "${target.niche}" in "${target.city}"...`,
