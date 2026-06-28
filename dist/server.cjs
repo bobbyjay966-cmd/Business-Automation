@@ -353,7 +353,8 @@ async function fetchRealSearchSnippets(query) {
     const res = await fetch(url, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-      }
+      },
+      signal: AbortSignal.timeout(1e4)
     });
     if (!res.ok) {
       throw new Error(`DuckDuckGo responded with status ${res.status}`);
@@ -658,7 +659,8 @@ async function callLlm(prompt, jsonMode = true) {
       temperature: 0.2,
       top_p: 0.7,
       max_tokens: 2048
-    })
+    }),
+    signal: AbortSignal.timeout(2e4)
   });
   if (!response.ok) {
     const errorText = await response.text();
@@ -762,27 +764,33 @@ Return ONLY a valid JSON array of 5 objects matching these fields.`;
       pitchStatus: "Scraped",
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     }));
-    console.log(`[Scraper] Crawling websites for LLM extracted listings to verify actual phone/email...`);
-    for (const lead of leads) {
-      if (lead.website) {
-        const contact = await scrapeContactInfoFromUrl(lead.website);
-        if (contact.phone) lead.phone = cleanPhoneNumber(contact.phone);
-        if (contact.email) {
-          lead.email = contact.email;
-          lead.notes = `[Verified Contact Info]
+    console.log(`[Scraper] Crawling websites in parallel for LLM extracted listings to verify actual phone/email...`);
+    await Promise.all(
+      leads.map(async (lead) => {
+        if (lead.website) {
+          try {
+            const contact = await scrapeContactInfoFromUrl(lead.website);
+            if (contact.phone) lead.phone = cleanPhoneNumber(contact.phone);
+            if (contact.email) {
+              lead.email = contact.email;
+              lead.notes = `[Verified Contact Info]
 Email: ${contact.email}
 Phone: ${lead.phone || "Not found"}`;
+            }
+          } catch (crawlErr) {
+            console.warn(`[Scraper] Failed to crawl website ${lead.website}:`, crawlErr);
+          }
         }
-      }
-      if (!lead.email && lead.website) {
-        try {
-          const host = new URL(lead.website).hostname.replace(/^www\./, "");
-          lead.email = `info@${host}`;
-          lead.notes = (lead.notes ? lead.notes + "\n" : "") + `[Generated Contact] Email (best-guess from domain): ${lead.email}`;
-        } catch {
+        if (!lead.email && lead.website) {
+          try {
+            const host = new URL(lead.website).hostname.replace(/^www\./, "");
+            lead.email = `info@${host}`;
+            lead.notes = (lead.notes ? lead.notes + "\n" : "") + `[Generated Contact] Email (best-guess from domain): ${lead.email}`;
+          } catch {
+          }
         }
-      }
-    }
+      })
+    );
     return leads;
   } catch (err) {
     console.error("Error in scrapeLeads, running fallback:", err);
@@ -1421,7 +1429,7 @@ async function tryScrapeForTarget(log) {
   const now = Date.now();
   const candidates = [];
   const initial = targets.find(
-    (t) => !prospects.some((p) => p.targetId === t.id)
+    (t) => !prospects.some((p) => p.targetId === t.id) && (!t.lastScrapedAt || now - new Date(t.lastScrapedAt).getTime() > SCRAPE_COOLDOWN_MS)
   );
   if (initial) candidates.push({ priority: 1, target: initial });
   for (const t of targets) {
@@ -1434,7 +1442,8 @@ async function tryScrapeForTarget(log) {
   }
   for (const t of targets) {
     const targetProspectCount = prospects.filter((p) => p.targetId === t.id).length;
-    if (targetProspectCount < 5 && targetProspectCount > 0) {
+    const isStale = !t.lastScrapedAt || now - new Date(t.lastScrapedAt).getTime() > SCRAPE_COOLDOWN_MS;
+    if (isStale && targetProspectCount < 5 && targetProspectCount > 0) {
       candidates.push({ priority: 3, target: t });
     }
   }
@@ -1474,7 +1483,7 @@ async function tryCreateStripeCustomerOne(log) {
   if (!isStripeLive()) return false;
   const prospects = await getProspects();
   const lead = prospects.find(
-    (p) => p.phone && p.email && !p.stripeCustomerId && p.pitchStatus === "Scraped"
+    (p) => p.phone && p.email && !p.stripeCustomerId && p.stripeCustomerId !== "failed" && p.pitchStatus !== "Disqualified"
   );
   if (!lead) return false;
   log.push(
@@ -1737,6 +1746,71 @@ async function trySendTrialEmail(log) {
     return true;
   }
 }
+async function tryAutoSubscribeOne(log) {
+  const settings = await getSettings();
+  if (!settings.isAutoSubscribeOn || !isStripeLive()) return false;
+  const prospects = await getProspects();
+  const sites = await getSites();
+  const numbers = await getNumbers();
+  const prospect = prospects.find(
+    (p) => p.stripeCustomerId && p.stripeCustomerId !== "failed" && !p.stripeSubscriptionId && p.pitchStatus === "Trial" && p.email && sites.some((s) => s.targetId === p.targetId)
+  );
+  if (!prospect) return false;
+  const site = sites.find((s) => s.targetId === prospect.targetId);
+  const hasLine = numbers.some(
+    (n) => n.friendlyName?.toLowerCase().includes(prospect.city.toLowerCase()) || n.friendlyName?.toLowerCase().includes(prospect.niche.toLowerCase())
+  ) || numbers.length > 0;
+  if (!hasLine) {
+    log.push(
+      `\u23F3 Cannot auto-subscribe "${prospect.name}": waiting for tracking line to be provisioned.`,
+      "info"
+    );
+    return false;
+  }
+  log.push(
+    `\u{1F4B3} AUTO-SUBSCRIBE: Creating Stripe subscription for "${prospect.name}"...`,
+    "process"
+  );
+  try {
+    const result = await createAutoSubscription(prospect, site);
+    prospect.stripeCustomerId = result.customerId;
+    prospect.stripeSubscriptionId = result.subscriptionId;
+    prospect.stripeInvoiceId = result.invoiceId;
+    prospect.stripeInvoiceUrl = result.invoiceUrl;
+    prospect.stripeInvoiceNumber = result.invoiceNumber;
+    prospect.subscriptionAmount = result.amountDue;
+    prospect.subscriptionCurrency = result.currency;
+    prospect.subscriptionNextDueDate = result.dueDate;
+    prospect.subscriptionStartDate = (/* @__PURE__ */ new Date()).toISOString();
+    prospect.subscriptionMode = result.mode;
+    prospect.stripeSubscriptionStatus = "active";
+    if (!result.alreadyHadSubscription) {
+      prospect.pitchStatus = "Rented";
+      const stamp = (/* @__PURE__ */ new Date()).toLocaleString();
+      prospect.notes = (prospect.notes ? prospect.notes + "\n" : "") + `${stamp} \u2014 [Stripe LIVE] $${(result.amountDue / 100).toFixed(2)} ${result.currency.toUpperCase()} subscription + invoice created via Autopilot.`;
+    }
+    await saveProspect(prospect);
+    if (!result.alreadyHadSubscription) {
+      const targets = await getTargets();
+      const target = targets.find((t) => t.id === prospect.targetId);
+      if (target) {
+        target.status = "rented";
+        await saveTarget(target);
+      }
+    }
+    log.push(
+      `\u{1F389} Auto-subscribed "${prospect.name}"! Subscription: ${result.subscriptionId}, Invoice: ${result.invoiceId}`,
+      "success"
+    );
+    return true;
+  } catch (err) {
+    log.push(
+      `\u274C Auto-subscription failed for "${prospect.name}": ${err?.message || err}`,
+      "warn"
+    );
+    return true;
+  }
+}
 function finish(log, start, action, summary) {
   return {
     ranAction: action !== "noop" && action !== "idle_scan" && action !== "skipped_off" && action !== "skipped_timeout",
@@ -1831,6 +1905,15 @@ async function runAutopilotCycle() {
           start,
           "send_trial_email",
           "Queued trial offer email."
+        );
+      }
+      const subscribed = await tryAutoSubscribeOne(log);
+      if (subscribed) {
+        return finish(
+          log,
+          start,
+          "auto_subscribe",
+          "Auto-subscribed a trial lead on Stripe."
         );
       }
       log.push("No actionable tasks found. All targets are healthy.", "info");

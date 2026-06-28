@@ -61,7 +61,7 @@ import {
   generateTrialOfferEmail,
   generateLandingPage,
 } from './llm';
-import { findOrCreateStripeCustomer, isStripeLive } from './stripe-billing';
+import { findOrCreateStripeCustomer, isStripeLive, createAutoSubscription } from './stripe-billing';
 import {
   isCallRailEnabled,
   provisionCallRailTracker,
@@ -215,6 +215,7 @@ export interface AutopilotCycleResult {
     | 'provision_line'
     | 'build_site'
     | 'send_trial_email'
+    | 'auto_subscribe'
     | 'idle_scan'
     | 'skipped_off'
     | 'skipped_timeout'
@@ -320,9 +321,11 @@ async function tryScrapeForTarget(
   const now = Date.now();
   const candidates: { priority: 1 | 2 | 3; target: NicheCityTarget }[] = [];
 
-  // P1: initial scrape — target with no prospects yet
+  // P1: initial scrape — target with no prospects yet (and not scraped recently)
   const initial = targets.find(
-    (t) => !prospects.some((p) => p.targetId === t.id),
+    (t) =>
+      !prospects.some((p) => p.targetId === t.id) &&
+      (!t.lastScrapedAt || (now - new Date(t.lastScrapedAt).getTime()) > SCRAPE_COOLDOWN_MS)
   );
   if (initial) candidates.push({ priority: 1, target: initial });
 
@@ -340,7 +343,9 @@ async function tryScrapeForTarget(
   // P3: low yield (but already has at least one prospect, so it isn't P1)
   for (const t of targets) {
     const targetProspectCount = prospects.filter((p) => p.targetId === t.id).length;
-    if (targetProspectCount < 5 && targetProspectCount > 0) {
+    const isStale = !t.lastScrapedAt
+      || (now - new Date(t.lastScrapedAt).getTime()) > SCRAPE_COOLDOWN_MS;
+    if (isStale && targetProspectCount < 5 && targetProspectCount > 0) {
       candidates.push({ priority: 3, target: t });
     }
   }
@@ -398,7 +403,11 @@ async function tryCreateStripeCustomerOne(
   const prospects = await getProspects();
   const lead = prospects.find(
     (p) =>
-      p.phone && p.email && !p.stripeCustomerId && p.pitchStatus === 'Scraped',
+      p.phone &&
+      p.email &&
+      !p.stripeCustomerId &&
+      p.stripeCustomerId !== 'failed' &&
+      p.pitchStatus !== 'Disqualified',
   );
   if (!lead) return false;
 
@@ -760,6 +769,103 @@ async function trySendTrialEmail(
   }
 }
 
+/**
+ * Automatically create a Stripe subscription/invoice for ONE trial prospect per cycle.
+ * Only runs if settings.isAutoSubscribeOn is true and Stripe is configured.
+ * Finds a prospect that has a stripeCustomerId, is in 'Trial' status, has no
+ * stripeSubscriptionId yet, and has a site built for their target.
+ */
+async function tryAutoSubscribeOne(
+  log: ReturnType<typeof makeLogBuffer>,
+): Promise<boolean> {
+  const settings = await getSettings();
+  if (!settings.isAutoSubscribeOn || !isStripeLive()) return false;
+
+  const prospects = await getProspects();
+  const sites = await getSites();
+  const numbers = await getNumbers();
+
+  const prospect = prospects.find(
+    (p) =>
+      p.stripeCustomerId &&
+      p.stripeCustomerId !== 'failed' &&
+      !p.stripeSubscriptionId &&
+      p.pitchStatus === 'Trial' &&
+      p.email &&
+      sites.some((s) => s.targetId === p.targetId)
+  );
+
+  if (!prospect) return false;
+
+  const site = sites.find((s) => s.targetId === prospect.targetId)!;
+
+  // Verify we have a tracking line for this target
+  const hasLine = numbers.some(
+    (n) =>
+      n.friendlyName?.toLowerCase().includes(prospect.city.toLowerCase()) ||
+      n.friendlyName?.toLowerCase().includes(prospect.niche.toLowerCase())
+  ) || numbers.length > 0;
+
+  if (!hasLine) {
+    log.push(
+      `⏳ Cannot auto-subscribe "${prospect.name}": waiting for tracking line to be provisioned.`,
+      'info',
+    );
+    return false;
+  }
+
+  log.push(
+    `💳 AUTO-SUBSCRIBE: Creating Stripe subscription for "${prospect.name}"...`,
+    'process',
+  );
+
+  try {
+    const result = await createAutoSubscription(prospect, site);
+    prospect.stripeCustomerId = result.customerId;
+    prospect.stripeSubscriptionId = result.subscriptionId;
+    prospect.stripeInvoiceId = result.invoiceId;
+    prospect.stripeInvoiceUrl = result.invoiceUrl;
+    prospect.stripeInvoiceNumber = result.invoiceNumber;
+    prospect.subscriptionAmount = result.amountDue;
+    prospect.subscriptionCurrency = result.currency;
+    prospect.subscriptionNextDueDate = result.dueDate;
+    prospect.subscriptionStartDate = new Date().toISOString();
+    prospect.subscriptionMode = result.mode;
+    prospect.stripeSubscriptionStatus = 'active';
+
+    if (!result.alreadyHadSubscription) {
+      prospect.pitchStatus = 'Rented';
+      const stamp = new Date().toLocaleString();
+      prospect.notes =
+        (prospect.notes ? prospect.notes + '\n' : '') +
+        `${stamp} — [Stripe LIVE] $${(result.amountDue / 100).toFixed(2)} ${result.currency.toUpperCase()} subscription + invoice created via Autopilot.`;
+    }
+
+    await saveProspect(prospect);
+
+    if (!result.alreadyHadSubscription) {
+      const targets = await getTargets();
+      const target = targets.find((t) => t.id === prospect.targetId);
+      if (target) {
+        target.status = 'rented';
+        await saveTarget(target);
+      }
+    }
+
+    log.push(
+      `🎉 Auto-subscribed "${prospect.name}"! Subscription: ${result.subscriptionId}, Invoice: ${result.invoiceId}`,
+      'success',
+    );
+    return true;
+  } catch (err: any) {
+    log.push(
+      `❌ Auto-subscription failed for "${prospect.name}": ${err?.message || err}`,
+      'warn',
+    );
+    return true; // We took an action (attempted subscription), let cycle move on
+  }
+}
+
 
 function finish(
   log: ReturnType<typeof makeLogBuffer>,
@@ -875,6 +981,13 @@ export async function runAutopilotCycle(): Promise<AutopilotCycleResult> {
       if (trialSent) {
         return finish(log, start, 'send_trial_email',
           'Queued trial offer email.');
+      }
+
+      // Priority 8: Auto-subscribe trial lead
+      const subscribed = await tryAutoSubscribeOne(log);
+      if (subscribed) {
+        return finish(log, start, 'auto_subscribe',
+          'Auto-subscribed a trial lead on Stripe.');
       }
 
       // Nothing to do — all stages are caught up

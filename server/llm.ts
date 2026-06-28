@@ -64,6 +64,7 @@ async function callLlm(prompt: string, jsonMode = true): Promise<string> {
       top_p: 0.7,
       max_tokens: 2048,
     }),
+    signal: AbortSignal.timeout(20000),
   });
 
   if (!response.ok) {
@@ -181,29 +182,35 @@ Return ONLY a valid JSON array of 5 objects matching these fields.`;
       createdAt: new Date().toISOString()
     }));
 
-    // Crawl actual website homepages for accurate, active phone/email info
-    console.log(`[Scraper] Crawling websites for LLM extracted listings to verify actual phone/email...`);
-    for (const lead of leads) {
-      if (lead.website) {
-        const contact = await scrapeContactInfoFromUrl(lead.website);
-        if (contact.phone) lead.phone = cleanPhoneNumber(contact.phone);
-        if (contact.email) {
-          lead.email = contact.email;
-          lead.notes = `[Verified Contact Info]\nEmail: ${contact.email}\nPhone: ${lead.phone || "Not found"}`;
+    // Crawl actual website homepages in parallel for accurate, active phone/email info
+    console.log(`[Scraper] Crawling websites in parallel for LLM extracted listings to verify actual phone/email...`);
+    await Promise.all(
+      leads.map(async (lead) => {
+        if (lead.website) {
+          try {
+            const contact = await scrapeContactInfoFromUrl(lead.website);
+            if (contact.phone) lead.phone = cleanPhoneNumber(contact.phone);
+            if (contact.email) {
+              lead.email = contact.email;
+              lead.notes = `[Verified Contact Info]\nEmail: ${contact.email}\nPhone: ${lead.phone || "Not found"}`;
+            }
+          } catch (crawlErr) {
+            console.warn(`[Scraper] Failed to crawl website ${lead.website}:`, crawlErr);
+          }
         }
-      }
-      // Fallback: if the website crawl didn't find an email but the lead
-      // has a domain, generate a best-guess business email so the lead
-      // can flow through pitching -> Stripe customer -> auto-subscribe.
-      if (!lead.email && lead.website) {
-        try {
-          const host = new URL(lead.website).hostname.replace(/^www\./, '');
-          lead.email = `info@${host}`;
-          lead.notes = (lead.notes ? lead.notes + '\n' : '') +
-            `[Generated Contact] Email (best-guess from domain): ${lead.email}`;
-        } catch {}
-      }
-    }
+        // Fallback: if the website crawl didn't find an email but the lead
+        // has a domain, generate a best-guess business email so the lead
+        // can flow through pitching -> Stripe customer -> auto-subscribe.
+        if (!lead.email && lead.website) {
+          try {
+            const host = new URL(lead.website).hostname.replace(/^www\./, '');
+            lead.email = `info@${host}`;
+            lead.notes = (lead.notes ? lead.notes + '\n' : '') +
+              `[Generated Contact] Email (best-guess from domain): ${lead.email}`;
+          } catch {}
+        }
+      })
+    );
     return leads;
   } catch (err) {
     console.error("Error in scrapeLeads, running fallback:", err);
