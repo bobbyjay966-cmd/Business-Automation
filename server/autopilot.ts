@@ -571,10 +571,17 @@ async function tryProvisionTrackingLine(
     );
     return true;
   } catch (err: any) {
+    const errMsg = err?.message || String(err);
     log.push(
-      `❌ CallRail provisioning failed for "${prospect.name}": ${err?.message || err}.`,
+      `❌ CallRail provisioning failed for "${prospect.name}": ${errMsg}.`,
       'warn',
     );
+    await notifyOncePerDay(prospect.targetId, 'callrail_provisioning_failed', {
+      type: 'system',
+      title: `🚫 CallRail provisioning failed for "${prospect.name}"`,
+      message: `CallRail returned an error: ${errMsg}\n\nMake sure your CallRail billing details/credit card are up to date.`,
+      metadata: { prospectId: prospect.id, error: errMsg },
+    });
     return true;
   }
 }

@@ -660,7 +660,7 @@ async function callLlm(prompt, jsonMode = true) {
       top_p: 0.7,
       max_tokens: 2048
     }),
-    signal: AbortSignal.timeout(2e4)
+    signal: AbortSignal.timeout(4e4)
   });
   if (!response.ok) {
     const errorText = await response.text();
@@ -1603,10 +1603,19 @@ Auto-provisioned by autopilot. Next cycle will build the site.`,
     );
     return true;
   } catch (err) {
+    const errMsg = err?.message || String(err);
     log.push(
-      `\u274C CallRail provisioning failed for "${prospect.name}": ${err?.message || err}.`,
+      `\u274C CallRail provisioning failed for "${prospect.name}": ${errMsg}.`,
       "warn"
     );
+    await notifyOncePerDay(prospect.targetId, "callrail_provisioning_failed", {
+      type: "system",
+      title: `\u{1F6AB} CallRail provisioning failed for "${prospect.name}"`,
+      message: `CallRail returned an error: ${errMsg}
+
+Make sure your CallRail billing details/credit card are up to date.`,
+      metadata: { prospectId: prospect.id, error: errMsg }
+    });
     return true;
   }
 }

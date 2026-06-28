@@ -64,7 +64,7 @@ async function callLlm(prompt: string, jsonMode = true): Promise<string> {
       top_p: 0.7,
       max_tokens: 2048,
     }),
-    signal: AbortSignal.timeout(20000),
+    signal: AbortSignal.timeout(40000),
   });
 
   if (!response.ok) {
