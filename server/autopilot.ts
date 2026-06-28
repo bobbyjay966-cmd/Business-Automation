@@ -61,7 +61,7 @@ import {
   generateTrialOfferEmail,
   generateLandingPage,
 } from './llm';
-import { findOrCreateStripeCustomer, isStripeLive, createAutoSubscription } from './stripe-billing';
+import { findOrCreateStripeCustomer, isStripeLive } from './stripe-billing';
 import {
   isCallRailEnabled,
   provisionCallRailTracker,
@@ -747,90 +747,7 @@ async function trySendTrialEmail(
   }
 }
 
-/**
- * Automatically create a Stripe subscription/invoice for ONE trial prospect per cycle.
- * Only runs if settings.isAutoSubscribeOn is true and Stripe is configured.
- */
-async function tryAutoSubscribeOne(
-  log: ReturnType<typeof makeLogBuffer>,
-): Promise<boolean> {
-  const settings = await getSettings();
-  if (!settings.isAutoSubscribeOn || !isStripeLive()) return false;
 
-  const prospects = await getProspects();
-  const sites = await getSites();
-
-  // Find a trial lead that has a Stripe customer ID, but lacks a subscription ID.
-  const prospect = prospects.find(
-    (p) =>
-      p.stripeCustomerId &&
-      p.stripeCustomerId !== 'failed' &&
-      !p.stripeSubscriptionId &&
-      p.pitchStatus === 'Trial' &&
-      p.siteUrl
-  );
-
-  if (!prospect) return false;
-
-  // Retrieve the generated site object in DB to pass to createAutoSubscription
-  const site = sites.find((s) => s.targetId === prospect.targetId) || {
-    id: `site-${Date.now()}`,
-    domainName: prospect.siteUrl,
-    niche: prospect.niche,
-    city: prospect.city,
-  };
-
-  log.push(
-    `💳 AUTO-SUBSCRIBE: Creating Stripe subscription for "${prospect.name}"...`,
-    'process',
-  );
-
-  try {
-    const result = await createAutoSubscription(prospect, site);
-    prospect.stripeCustomerId = result.customerId;
-    prospect.stripeSubscriptionId = result.subscriptionId;
-    prospect.stripeInvoiceId = result.invoiceId;
-    prospect.stripeInvoiceUrl = result.invoiceUrl;
-    prospect.stripeInvoiceNumber = result.invoiceNumber;
-    prospect.subscriptionAmount = result.amountDue;
-    prospect.subscriptionCurrency = result.currency;
-    prospect.subscriptionNextDueDate = result.dueDate;
-    prospect.subscriptionStartDate = new Date().toISOString();
-    prospect.subscriptionMode = result.mode;
-    prospect.stripeSubscriptionStatus = 'active';
-
-    if (!result.alreadyHadSubscription) {
-      prospect.pitchStatus = 'Rented';
-      const stamp = new Date().toLocaleString();
-      prospect.notes =
-        (prospect.notes ? prospect.notes + '\n' : '') +
-        `${stamp} — [Stripe LIVE] $${(result.amountDue / 100).toFixed(2)} ${result.currency.toUpperCase()} subscription + invoice created via Autopilot.`;
-    }
-
-    await saveProspect(prospect);
-
-    if (!result.alreadyHadSubscription) {
-      const targets = await getTargets();
-      const target = targets.find((t) => t.id === prospect.targetId);
-      if (target) {
-        target.status = 'rented';
-        await saveTarget(target);
-      }
-    }
-
-    log.push(
-      `🎉 Auto-subscribed "${prospect.name}"! Subscription: ${result.subscriptionId}, Invoice: ${result.invoiceId}`,
-      'success',
-    );
-    return true;
-  } catch (err: any) {
-    log.push(
-      `❌ Auto-subscription failed for "${prospect.name}": ${err?.message || err}`,
-      'warn',
-    );
-    return true;
-  }
-}
 
 
 function finish(
@@ -912,13 +829,6 @@ export async function runAutopilotCycle(): Promise<AutopilotCycleResult> {
       if (scrapeResult) {
         return finish(log, start, 'scrape_target',
           `Scraped ${scrapeResult.newLeadCount} new leads for ${scrapeResult.target.niche} in ${scrapeResult.target.city}.`);
-      }
-
-      // Priority 3: Auto-subscribe trial lead
-      const subscribed = await tryAutoSubscribeOne(log);
-      if (subscribed) {
-        return finish(log, start, 'auto_subscribe',
-          'Auto-subscribed a trial lead on Stripe.');
       }
 
       // Priority 4: Create Stripe customer for a qualified lead

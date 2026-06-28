@@ -1994,65 +1994,6 @@ async function trySendTrialEmail(log) {
     return true;
   }
 }
-async function tryAutoSubscribeOne(log) {
-  const settings = await getSettings();
-  if (!settings.isAutoSubscribeOn || !isStripeLive()) return false;
-  const prospects = await getProspects();
-  const sites = await getSites();
-  const prospect = prospects.find(
-    (p) => p.stripeCustomerId && p.stripeCustomerId !== "failed" && !p.stripeSubscriptionId && p.pitchStatus === "Trial" && p.siteUrl
-  );
-  if (!prospect) return false;
-  const site = sites.find((s) => s.targetId === prospect.targetId) || {
-    id: `site-${Date.now()}`,
-    domainName: prospect.siteUrl,
-    niche: prospect.niche,
-    city: prospect.city
-  };
-  log.push(
-    `\u{1F4B3} AUTO-SUBSCRIBE: Creating Stripe subscription for "${prospect.name}"...`,
-    "process"
-  );
-  try {
-    const result = await createAutoSubscription(prospect, site);
-    prospect.stripeCustomerId = result.customerId;
-    prospect.stripeSubscriptionId = result.subscriptionId;
-    prospect.stripeInvoiceId = result.invoiceId;
-    prospect.stripeInvoiceUrl = result.invoiceUrl;
-    prospect.stripeInvoiceNumber = result.invoiceNumber;
-    prospect.subscriptionAmount = result.amountDue;
-    prospect.subscriptionCurrency = result.currency;
-    prospect.subscriptionNextDueDate = result.dueDate;
-    prospect.subscriptionStartDate = (/* @__PURE__ */ new Date()).toISOString();
-    prospect.subscriptionMode = result.mode;
-    prospect.stripeSubscriptionStatus = "active";
-    if (!result.alreadyHadSubscription) {
-      prospect.pitchStatus = "Rented";
-      const stamp = (/* @__PURE__ */ new Date()).toLocaleString();
-      prospect.notes = (prospect.notes ? prospect.notes + "\n" : "") + `${stamp} \u2014 [Stripe LIVE] $${(result.amountDue / 100).toFixed(2)} ${result.currency.toUpperCase()} subscription + invoice created via Autopilot.`;
-    }
-    await saveProspect(prospect);
-    if (!result.alreadyHadSubscription) {
-      const targets = await getTargets();
-      const target = targets.find((t) => t.id === prospect.targetId);
-      if (target) {
-        target.status = "rented";
-        await saveTarget(target);
-      }
-    }
-    log.push(
-      `\u{1F389} Auto-subscribed "${prospect.name}"! Subscription: ${result.subscriptionId}, Invoice: ${result.invoiceId}`,
-      "success"
-    );
-    return true;
-  } catch (err) {
-    log.push(
-      `\u274C Auto-subscription failed for "${prospect.name}": ${err?.message || err}`,
-      "warn"
-    );
-    return true;
-  }
-}
 function finish(log, start, action, summary) {
   return {
     ranAction: action !== "noop" && action !== "idle_scan" && action !== "skipped_off" && action !== "skipped_timeout",
@@ -2102,15 +2043,6 @@ async function runAutopilotCycle() {
           start,
           "scrape_target",
           `Scraped ${scrapeResult.newLeadCount} new leads for ${scrapeResult.target.niche} in ${scrapeResult.target.city}.`
-        );
-      }
-      const subscribed = await tryAutoSubscribeOne(log);
-      if (subscribed) {
-        return finish(
-          log,
-          start,
-          "auto_subscribe",
-          "Auto-subscribed a trial lead on Stripe."
         );
       }
       const stripeCreated = await tryCreateStripeCustomerOne(log);
