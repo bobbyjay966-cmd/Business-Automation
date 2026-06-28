@@ -767,6 +767,106 @@ function timeoutResult(
 }
 
 // ----------------------------------------------------------------
+// Main cycle orchestrator — one action per tick
+// ----------------------------------------------------------------
+
+/**
+ * Run exactly ONE autopilot action. Each invocation walks the decision
+ * tree in priority order and stops as soon as one stage reports success.
+ * A hard timeout (CYCLE_TIMEOUT_MS) prevents runaway LLM calls from
+ * blocking the loop forever.
+ *
+ * Priority order:
+ *   1. Add a new niche × city target (grow portfolio)
+ *   2. Scrape fresh leads for the most eligible target
+ *   3. Create a Stripe customer for a qualified lead
+ *   4. Generate an outreach pitch for one lead
+ *   5. Provision a CallRail tracking line for a target
+ *   6. Build a landing page for a target
+ *   7. Queue a trial offer email for one prospect
+ */
+export async function runAutopilotCycle(): Promise<AutopilotCycleResult> {
+  const log = makeLogBuffer();
+  const start = Date.now();
+
+  // Hard timeout wrapper — the caller (setInterval or cron) shouldn't
+  // wait forever if the LLM API hangs.
+  const timeoutPromise = new Promise<AutopilotCycleResult>((resolve) => {
+    setTimeout(() => resolve(timeoutResult(log, start)), CYCLE_TIMEOUT_MS);
+  });
+
+  const workPromise = (async (): Promise<AutopilotCycleResult> => {
+    try {
+      const settings = await getSettings();
+      if (!settings.isAutopilotOn) {
+        log.push('Autopilot disabled — skipping cycle.', 'info');
+        return finish(log, start, 'skipped_off', 'Autopilot is turned off.');
+      }
+
+      // Priority 1: Add a new target
+      const newTarget = await tryAddTarget(log);
+      if (newTarget) {
+        return finish(log, start, 'add_target',
+          `Added new target market: ${newTarget.niche} in ${newTarget.city}.`);
+      }
+
+      // Priority 2: Scrape leads for a target
+      const scrapeResult = await tryScrapeForTarget(log);
+      if (scrapeResult) {
+        return finish(log, start, 'scrape_target',
+          `Scraped ${scrapeResult.newLeadCount} new leads for ${scrapeResult.target.niche} in ${scrapeResult.target.city}.`);
+      }
+
+      // Priority 3: Create Stripe customer for a qualified lead
+      const stripeCreated = await tryCreateStripeCustomerOne(log);
+      if (stripeCreated) {
+        return finish(log, start, 'create_stripe_customer',
+          'Created Stripe customer for a lead.');
+      }
+
+      // Priority 4: Pitch one lead
+      const pitched = await tryPitchOne(log);
+      if (pitched) {
+        return finish(log, start, 'pitch_lead',
+          'Generated outreach pitch for a lead.');
+      }
+
+      // Priority 5: Provision a CallRail tracking line
+      const lineProvisioned = await tryProvisionTrackingLine(log);
+      if (lineProvisioned) {
+        return finish(log, start, 'provision_line',
+          'Provisioned (or reported missing prereqs for) a CallRail tracking line.');
+      }
+
+      // Priority 6: Build a landing page
+      const siteResult = await tryBuildSite(log);
+      if (siteResult) {
+        return finish(log, start, 'build_site',
+          `Built landing page for ${siteResult.target.niche} in ${siteResult.target.city}.`);
+      }
+
+      // Priority 7: Send trial offer email
+      const trialSent = await trySendTrialEmail(log);
+      if (trialSent) {
+        return finish(log, start, 'send_trial_email',
+          'Queued trial offer email.');
+      }
+
+      // Nothing to do — all stages are caught up
+      log.push('No actionable tasks found. All targets are healthy.', 'info');
+      return finish(log, start, 'idle_scan',
+        'All targets are healthy — no actions needed.');
+    } catch (err: any) {
+      log.push(`Unexpected cycle error: ${err?.message || err}`, 'warn');
+      return finish(log, start, 'noop',
+        `Cycle aborted: ${err?.message || err}`);
+    }
+  })();
+
+  return Promise.race([workPromise, timeoutPromise]);
+}
+
+// ----------------------------------------------------------------
 // Status snapshot for the client UI
 // ----------------------------------------------------------------
 
