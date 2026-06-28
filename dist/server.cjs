@@ -618,10 +618,12 @@ function cleanAndParseJson(text) {
 }
 var NVIDIA_BASE_URL = process.env.NVIDIA_BASE_URL || "https://integrate.api.nvidia.com/v1";
 var NVIDIA_MODEL = process.env.NVIDIA_MODEL || "meta/llama-3.3-70b-instruct";
-async function callNvidiaLlm(prompt, jsonMode) {
+async function callLlm(prompt, jsonMode = true) {
   const apiKey = process.env.NVIDIA_API_KEY;
   if (!apiKey) {
-    throw new Error("NVIDIA_API_KEY is set but empty \u2014 check your .env file.");
+    throw new Error(
+      "NVIDIA_API_KEY is not set. Add it to your .env file.\nGet a free key with credits at https://build.nvidia.com."
+    );
   }
   const targetUrl = `${NVIDIA_BASE_URL.replace(/\/$/, "")}/chat/completions`;
   console.log(
@@ -660,7 +662,7 @@ async function callNvidiaLlm(prompt, jsonMode) {
   const content = data.choices?.[0]?.message?.content;
   if (content) {
     console.log(
-      `[LLM:NVIDIA] \u2713 succeeded in ${Date.now() - start}ms (${content.length} chars)`
+      `[LLM:NVIDIA] OK in ${Date.now() - start}ms (${content.length} chars)`
     );
     return content;
   }
@@ -671,99 +673,6 @@ async function callNvidiaLlm(prompt, jsonMode) {
       )
     )
   );
-}
-async function callLlm(prompt, jsonMode = true) {
-  if (process.env.NVIDIA_API_KEY) {
-    return callNvidiaLlm(prompt, jsonMode);
-  }
-  const localUrl = process.env.LOCAL_LLM_URL;
-  if (!localUrl || localUrl.trim() === "") {
-    throw new Error(
-      `Neither NVIDIA_API_KEY nor LOCAL_LLM_URL is set. Configure one in .env:
-  \u2022 NVIDIA:  NVIDIA_API_KEY=nvapi-... (cloud, recommended)
-  \u2022 Ollama:  LOCAL_LLM_URL=http://localhost:11434
-  \u2022 LM Studio: LOCAL_LLM_URL=http://localhost:1234/v1
-Then set LOCAL_LLM_MODEL to a model you have already pulled/loaded.`
-    );
-  }
-  const model = process.env.LOCAL_LLM_MODEL || "llama3.1";
-  const targetUrl = localUrl.endsWith("/chat/completions") ? localUrl : `${localUrl.replace(/\/$/, "")}/chat/completions`;
-  console.log(`[LLM] Calling local LLM at: ${targetUrl} (model=${model})`);
-  const systemMessages = jsonMode ? [
-    { role: "system", content: "You must return a valid json object." },
-    { role: "user", content: prompt }
-  ] : [{ role: "user", content: prompt }];
-  const defaultStrategies = ["json_object", "json_schema", "no_response_format"];
-  const rawPin = (process.env.LOCAL_LLM_RESPONSE_FORMAT || "").toLowerCase();
-  const pinned = rawPin === "none" ? "no_response_format" : rawPin;
-  const strategies = jsonMode ? pinned && defaultStrategies.includes(pinned) ? [pinned] : defaultStrategies : ["plain"];
-  for (const attemptDescr of strategies) {
-    const useJsonObject = attemptDescr === "json_object";
-    const useJsonSchema = attemptDescr === "json_schema";
-    const attemptStart = Date.now();
-    console.log(`[LLM] Attempt: ${attemptDescr}${useJsonObject || useJsonSchema ? "" : strategies.length > 1 ? " (fallback)" : ""}`);
-    let response;
-    try {
-      response = await fetch(targetUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model,
-          messages: useJsonObject ? systemMessages : jsonMode ? [
-            {
-              role: "system",
-              content: "You must return ONLY a valid JSON object \u2014 no markdown fences, no explanatory text, nothing but the raw JSON. Every response you give must be parseable by JSON.parse()."
-            },
-            { role: "user", content: prompt }
-          ] : [{ role: "user", content: prompt }],
-          response_format: useJsonObject ? { type: "json_object" } : useJsonSchema ? {
-            type: "json_schema",
-            json_schema: {
-              name: "response",
-              strict: false,
-              schema: { type: "object" }
-            }
-          } : void 0,
-          temperature: 0.7
-        })
-      });
-    } catch (err) {
-      throw new Error(formatLlmError(err));
-    }
-    if (response.ok) {
-      const data = await response.json();
-      const content = data.choices?.[0]?.message?.content;
-      if (content) {
-        console.log(
-          `[LLM] \u2713 ${attemptDescr} succeeded in ${Date.now() - attemptStart}ms (${content.length} chars)`
-        );
-        return content;
-      }
-      throw new Error(
-        formatLlmError(
-          new Error(
-            `Local LLM returned HTTP 200 but no message content: ${JSON.stringify(data).slice(0, 300)}`
-          )
-        )
-      );
-    }
-    const isStructuredOutputAttempt = useJsonObject || useJsonSchema;
-    const isRecoverableStatus = response.status === 400 || response.status === 422;
-    if (isRecoverableStatus && isStructuredOutputAttempt) {
-      const errorText2 = await response.text();
-      console.log(
-        `[LLM] Server rejected ${attemptDescr} (HTTP ${response.status}) \u2014 retrying with next strategy.`
-      );
-      continue;
-    }
-    const errorText = await response.text();
-    throw new Error(
-      formatLlmError(new Error(`Local LLM HTTP ${response.status}: ${errorText.slice(0, 500)}`))
-    );
-  }
-  throw new Error(`Local LLM: exhausted retry attempts.`);
 }
 async function analyzeMarket(niche, city) {
   const searchContext = await fetchRealSearchSnippets(`${niche} competitors in ${city}`);
@@ -851,6 +760,14 @@ Return ONLY a valid JSON array of 5 objects matching these fields.`;
           lead.notes = `[Verified Contact Info]
 Email: ${contact.email}
 Phone: ${lead.phone || "Not found"}`;
+        }
+      }
+      if (!lead.email && lead.website) {
+        try {
+          const host = new URL(lead.website).hostname.replace(/^www\./, "");
+          lead.email = `info@${host}`;
+          lead.notes = (lead.notes ? lead.notes + "\n" : "") + `[Generated Contact] Email (best-guess from domain): ${lead.email}`;
+        } catch {
         }
       }
     }
@@ -954,74 +871,37 @@ function formatLlmError(err) {
   if (!err) return "An unknown error occurred.";
   const rawMsg = err.message || String(err);
   const lower = rawMsg.toLowerCase();
-  const localUrl = process.env.LOCAL_LLM_URL || "http://localhost:11434";
-  const model = process.env.LOCAL_LLM_MODEL || "llama3.1";
-  if (process.env.NVIDIA_API_KEY && (lower.includes("nvidia") || lower.includes("nvapi"))) {
-    const httpMatch2 = rawMsg.match(/HTTP\s+(\d{3})/i);
-    if (httpMatch2) {
-      const status = httpMatch2[1];
-      if (status === "401" || status === "403") {
-        return `NVIDIA LLM returned HTTP ${status} (unauthorized).
-Check that NVIDIA_API_KEY in your .env is valid and not expired.
-Get a fresh key at https://build.nvidia.com.`;
-      }
-      if (status === "429") {
-        return `NVIDIA LLM returned HTTP 429 (rate limited).
-You've exceeded your NVIDIA API quota. Wait a few minutes or upgrade your plan.`;
-      }
-      if (status.startsWith("5")) {
-        return `NVIDIA LLM returned HTTP ${status} (server error).
-NVIDIA's API may be experiencing an outage. Check status at https://status.nvidia.com.`;
-      }
-      return `NVIDIA LLM returned HTTP ${status}: ${rawMsg.slice(0, 300)}`;
-    }
-    if (lower.includes("econnrefused") || lower.includes("enotfound") || lower.includes("failed to fetch") || lower.includes("fetch failed")) {
-      return `Could not reach NVIDIA API at ${NVIDIA_BASE_URL}.
-Check your internet connection and that the NVIDIA API is not blocked by a firewall.`;
-    }
-    if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) {
-      return `NVIDIA LLM request timed out. The 70B model may be under heavy load.
-Try again in a few seconds, or switch to a local LLM by removing NVIDIA_API_KEY.`;
-    }
-    return `NVIDIA LLM error: ${rawMsg.slice(0, 500)}`;
-  }
-  if (lower.includes("econnrefused") || lower.includes("enotfound") || lower.includes("eai_again") || lower.includes("ehostunreach") || lower.includes("enetunreach") || lower.includes("connection refused") || lower.includes("failed to fetch") || lower.includes("fetch failed") || lower.includes("network request failed") || lower.includes("getaddrinfo")) {
-    return `Could not reach the local LLM at ${localUrl}.
-Make sure your local LLM server is running:
-  \u2022 Ollama:    run \`ollama serve\` (default URL: http://localhost:11434)
-  \u2022 LM Studio: enable the local server in the Developer tab (default URL: http://localhost:1234/v1)
-Then set LOCAL_LLM_URL in your .env to match.`;
-  }
-  if (lower.includes("model") && (lower.includes("not found") || lower.includes("does not exist") || lower.includes("unknown model") || lower.includes("no such model")) || lower.includes("404") && lower.includes("model")) {
-    return `Local LLM could not find model "${model}".
-Pull it first (Ollama: \`ollama pull ${model}\`, LM Studio: download from the Discover tab), or set LOCAL_LLM_MODEL in your .env to a model that is already installed.`;
-  }
-  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("aborted") || lower.includes("abort") || lower.includes("etimedout")) {
-    return `Local LLM request timed out. The model may still be loading, or the prompt is too large.
-Try a smaller/faster model (e.g. \`ollama pull llama3.2:3b\`), or shorten the prompt.`;
-  }
   const httpMatch = rawMsg.match(/HTTP\s+(\d{3})/i);
   if (httpMatch) {
     const status = httpMatch[1];
-    if (status === "404") {
-      return `Local LLM returned HTTP 404. Check that LOCAL_LLM_URL points to a valid \`/chat/completions\` endpoint and that the model in LOCAL_LLM_MODEL is installed.`;
-    }
     if (status === "401" || status === "403") {
-      return `Local LLM returned HTTP ${status}. The local server requires authentication \u2014 either disable auth in the local LLM settings, or include the API key in the URL (e.g. \`http://localhost:1234/v1\` with an \`Authorization: Bearer ...\` header).`;
+      return `NVIDIA LLM returned HTTP ${status} (unauthorized).
+Check that NVIDIA_API_KEY is valid and not expired.
+Get a fresh key at https://build.nvidia.com.`;
     }
-    if (status === "422") {
-      return `Local LLM returned HTTP 422 (Unprocessable Entity). This usually means the prompt or the \`response_format: json_object\` flag is not supported by the model. Try a model that supports JSON mode (e.g. llama3.1, qwen2.5, mistral).`;
+    if (status === "429") {
+      return `NVIDIA LLM returned HTTP 429 (rate limited).
+You've exceeded your NVIDIA API quota. Wait a few minutes or upgrade your plan.`;
     }
     if (status.startsWith("5")) {
-      return `Local LLM returned HTTP ${status} (server error). The model may have crashed; try a different model, or restart the local LLM server.`;
+      return `NVIDIA LLM returned HTTP ${status} (server error).
+NVIDIA's API may be experiencing an outage.`;
     }
-    return `Local LLM returned HTTP ${status}: ${rawMsg.slice(0, 200)}`;
+    return `NVIDIA LLM returned HTTP ${status}: ${rawMsg.slice(0, 300)}`;
+  }
+  if (lower.includes("econnrefused") || lower.includes("enotfound") || lower.includes("failed to fetch") || lower.includes("fetch failed")) {
+    return `Could not reach NVIDIA API at ${NVIDIA_BASE_URL}.
+Check your internet connection.`;
+  }
+  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("etimedout")) {
+    return `NVIDIA LLM request timed out. The 70B model may be under heavy load.
+Try again in a few seconds.`;
   }
   if (lower.includes("no message content")) {
-    return `Local LLM returned a response with no message content.
-This often happens when the model does not support \`response_format: json_object\`. Use a model that supports JSON mode (e.g. llama3.1, qwen2.5, mistral) or a recent Ollama version.`;
+    return `NVIDIA LLM returned a response with no message content.
+This is unexpected \u2014 try again or check the NVIDIA API status.`;
   }
-  return `Local LLM error: ${rawMsg.slice(0, 500)}`;
+  return `NVIDIA LLM error: ${rawMsg.slice(0, 500)}`;
 }
 
 // server/stripe-billing.ts
@@ -1813,163 +1693,6 @@ async function trySendTrialEmail(log) {
     return true;
   }
 }
-async function tryAutoSubscribe(log) {
-  if (!process.env.STRIPE_SECRET_KEY || process.env.STRIPE_SECRET_KEY.includes("mock")) {
-    return false;
-  }
-  const targets = await getTargets();
-  const prospects = await getProspects();
-  const sites = await getSites();
-  const numbers = await getNumbers();
-  const siteByTarget = {};
-  for (const s of sites) siteByTarget[s.targetId] = s;
-  const numbersMatching = (t) => {
-    const c = t.city.toLowerCase();
-    const n = t.niche.toLowerCase();
-    return numbers.filter((num) => {
-      const fn = num.friendlyName?.toLowerCase() || "";
-      return fn.includes(c) || fn.includes(n);
-    });
-  };
-  const targetReady = targets.find(
-    (t) => !!siteByTarget[t.id] && numbersMatching(t).length > 0
-  );
-  if (!targetReady) return false;
-  const billable = prospects.find(
-    (p) => p.targetId === targetReady.id && (p.pitchStatus === "Pitched" || p.pitchStatus === "Trial") && p.email && p.email.trim() !== "" && !p.stripeSubscriptionId
-  );
-  if (!billable) return false;
-  const liveSite = siteByTarget[targetReady.id];
-  log.push(
-    `\u{1F4B3} STRIPE AUTO-SUB: "${billable.name}" is ready to lease "${liveSite?.domainName || targetReady.city + " " + targetReady.niche}". Creating subscription + invoice...`,
-    "income"
-  );
-  try {
-    const result = await createAutoSubscription(billable, liveSite || null);
-    billable.stripeCustomerId = result.customerId;
-    billable.stripeSubscriptionId = result.subscriptionId;
-    billable.stripeInvoiceId = result.invoiceId;
-    billable.stripeInvoiceUrl = result.invoiceUrl;
-    billable.stripeInvoiceNumber = result.invoiceNumber;
-    billable.subscriptionAmount = result.amountDue;
-    billable.subscriptionCurrency = result.currency;
-    billable.subscriptionNextDueDate = result.dueDate;
-    billable.subscriptionStartDate = (/* @__PURE__ */ new Date()).toISOString();
-    billable.subscriptionMode = result.mode;
-    billable.stripeSubscriptionStatus = "active";
-    if (!result.alreadyHadSubscription) {
-      billable.pitchStatus = "Rented";
-      const stamp = (/* @__PURE__ */ new Date()).toLocaleString();
-      billable.notes = (billable.notes ? billable.notes + "\n" : "") + `${stamp} \u2014 [Stripe LIVE] $${(result.amountDue / 100).toFixed(2)} ${result.currency.toUpperCase()} subscription + invoice created.`;
-    }
-    await saveProspect(billable);
-    if (!result.alreadyHadSubscription) {
-      targetReady.status = "rented";
-      await saveTarget(targetReady);
-    }
-    log.push(
-      `\u2705 Stripe LIVE: Subscription ${result.subscriptionId} activated for "${billable.name}". Invoice ${result.invoiceId} emailed.`,
-      "income"
-    );
-    log.push(
-      `\u{1F4C8} MRR+$${(result.amountDue / 100).toFixed(2)}! "${billable.name}" is now an active RENTED tenant.`,
-      "income"
-    );
-    return true;
-  } catch (err) {
-    log.push(
-      `\u274C Auto-subscribe failed for "${billable.name}": ${err?.message || err}.`,
-      "warn"
-    );
-    return true;
-  }
-}
-async function runAutopilotCycle() {
-  const start = Date.now();
-  const log = makeLogBuffer();
-  isCycleRunning = true;
-  let timedOut = false;
-  const timeoutHandle = setTimeout(() => {
-    timedOut = true;
-    log.push("\u23F1\uFE0F Cycle timeout reached \u2014 short-circuiting.", "warn");
-  }, CYCLE_TIMEOUT_MS);
-  try {
-    const settings = await getSettings();
-    if (!settings.isAutopilotOn) {
-      log.push('\u{1F6D1} Autopilot is OFF. Toggle "Start AI Autopilot" in the UI to begin.', "info");
-      return {
-        ranAction: false,
-        action: "skipped_off",
-        summary: "Autopilot disabled \u2014 skipping cycle.",
-        logs: log.logs,
-        durationMs: Date.now() - start,
-        finishedAt: (/* @__PURE__ */ new Date()).toISOString()
-      };
-    }
-    if (timedOut) return timeoutResult(log, start);
-    log.push("\u26A1 Starting Autopilot pipeline analysis...", "process");
-    const newTarget = await tryAddTarget(log);
-    if (newTarget) {
-      return finish(log, start, "add_target", `Added ${newTarget.niche}/${newTarget.city}.`);
-    }
-    if (timedOut) return timeoutResult(log, start);
-    const scraped = await tryScrapeForTarget(log);
-    if (scraped) {
-      return finish(
-        log,
-        start,
-        "scrape_target",
-        `Scraped ${scraped.newLeadCount} fresh leads for ${scraped.target.niche}/${scraped.target.city}.`
-      );
-    }
-    if (timedOut) return timeoutResult(log, start);
-    if (await tryCreateStripeCustomerOne(log)) {
-      return finish(log, start, "create_stripe_customer", "Created Stripe customer for one verified lead.");
-    }
-    if (timedOut) return timeoutResult(log, start);
-    if (await tryPitchOne(log)) {
-      return finish(log, start, "pitch_lead", "Pitched one prospect.");
-    }
-    if (timedOut) return timeoutResult(log, start);
-    if (await tryProvisionTrackingLine(log)) {
-      return finish(log, start, "provision_line", "CallRail line provisioning step ran.");
-    }
-    if (timedOut) return timeoutResult(log, start);
-    const built = await tryBuildSite(log);
-    if (built) {
-      return finish(
-        log,
-        start,
-        "build_site",
-        `Built site ${built.site.domainName} for ${built.target.niche}/${built.target.city}.`
-      );
-    }
-    if (timedOut) return timeoutResult(log, start);
-    if (await trySendTrialEmail(log)) {
-      return finish(log, start, "send_trial_email", "Sent one trial email.");
-    }
-    if (timedOut) return timeoutResult(log, start);
-    if (settings.isAutoSubscribeOn && await tryAutoSubscribe(log)) {
-      return finish(log, start, "auto_subscribe", "Issued a Stripe auto-subscription.");
-    }
-    if (timedOut) return timeoutResult(log, start);
-    log.push("\u{1F9D8} Portfolio audit complete. No actionable targets this tick.", "info");
-    return finish(log, start, "idle_scan", "No action \u2014 idle scan.");
-  } catch (err) {
-    log.push(`\u274C Autopilot cycle error: ${err?.message || err}.`, "warn");
-    return {
-      ranAction: false,
-      action: "noop",
-      summary: `Cycle error: ${err?.message || err}`,
-      logs: log.logs,
-      durationMs: Date.now() - start,
-      finishedAt: (/* @__PURE__ */ new Date()).toISOString()
-    };
-  } finally {
-    clearTimeout(timeoutHandle);
-    isCycleRunning = false;
-  }
-}
 function finish(log, start, action, summary) {
   return {
     ranAction: action !== "noop" && action !== "idle_scan" && action !== "skipped_off" && action !== "skipped_timeout",
@@ -1989,6 +1712,101 @@ function timeoutResult(log, start) {
     durationMs: Date.now() - start,
     finishedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
+}
+async function runAutopilotCycle() {
+  const log = makeLogBuffer();
+  const start = Date.now();
+  const timeoutPromise = new Promise((resolve) => {
+    setTimeout(() => resolve(timeoutResult(log, start)), CYCLE_TIMEOUT_MS);
+  });
+  const workPromise = (async () => {
+    try {
+      const settings = await getSettings();
+      if (!settings.isAutopilotOn) {
+        log.push("Autopilot disabled \u2014 skipping cycle.", "info");
+        return finish(log, start, "skipped_off", "Autopilot is turned off.");
+      }
+      const newTarget = await tryAddTarget(log);
+      if (newTarget) {
+        return finish(
+          log,
+          start,
+          "add_target",
+          `Added new target market: ${newTarget.niche} in ${newTarget.city}.`
+        );
+      }
+      const scrapeResult = await tryScrapeForTarget(log);
+      if (scrapeResult) {
+        return finish(
+          log,
+          start,
+          "scrape_target",
+          `Scraped ${scrapeResult.newLeadCount} new leads for ${scrapeResult.target.niche} in ${scrapeResult.target.city}.`
+        );
+      }
+      const stripeCreated = await tryCreateStripeCustomerOne(log);
+      if (stripeCreated) {
+        return finish(
+          log,
+          start,
+          "create_stripe_customer",
+          "Created Stripe customer for a lead."
+        );
+      }
+      const pitched = await tryPitchOne(log);
+      if (pitched) {
+        return finish(
+          log,
+          start,
+          "pitch_lead",
+          "Generated outreach pitch for a lead."
+        );
+      }
+      const lineProvisioned = await tryProvisionTrackingLine(log);
+      if (lineProvisioned) {
+        return finish(
+          log,
+          start,
+          "provision_line",
+          "Provisioned (or reported missing prereqs for) a CallRail tracking line."
+        );
+      }
+      const siteResult = await tryBuildSite(log);
+      if (siteResult) {
+        return finish(
+          log,
+          start,
+          "build_site",
+          `Built landing page for ${siteResult.target.niche} in ${siteResult.target.city}.`
+        );
+      }
+      const trialSent = await trySendTrialEmail(log);
+      if (trialSent) {
+        return finish(
+          log,
+          start,
+          "send_trial_email",
+          "Queued trial offer email."
+        );
+      }
+      log.push("No actionable tasks found. All targets are healthy.", "info");
+      return finish(
+        log,
+        start,
+        "idle_scan",
+        "All targets are healthy \u2014 no actions needed."
+      );
+    } catch (err) {
+      log.push(`Unexpected cycle error: ${err?.message || err}`, "warn");
+      return finish(
+        log,
+        start,
+        "noop",
+        `Cycle aborted: ${err?.message || err}`
+      );
+    }
+  })();
+  return Promise.race([workPromise, timeoutPromise]);
 }
 var bootTime = Date.now();
 var lastCycle = null;

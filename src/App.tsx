@@ -324,29 +324,25 @@ export default function App() {
                 <p className="text-xs text-slate-300 leading-relaxed mt-0.5">
                   {apiError}
                 </p>
-                {/\b(econnrefused|enotfound|fetch failed|failed to fetch|connection refused|model.{0,30}(not found|does not exist|unknown model)|no such model|timed?\s?out|abort|etimedout|local\s?llm|local\s?model|llm.{0,10}not\s?set|http\s?(404|422|500|502|503|504))\b/i.test(apiError) && (
+                {/\b(econnrefused|enotfound|fetch failed|failed to fetch|connection refused|model.{0,30}(not found|does not exist|unknown model)|no such model|timed?\s?out|abort|etimedout|llm.{0,10}not\s?set|http\s?(401|403|404|422|429|500|502|503|504))\b/i.test(apiError) && (
                   <div className="text-[11px] text-amber-400/95 leading-relaxed mt-2 bg-amber-500/5 px-3.5 py-2.5 rounded-xl border border-amber-500/10 space-y-1.5">
                     <div>
-                      💡 <strong>Start your local LLM:</strong> the app talks to a local model via an OpenAI-compatible endpoint. Configure it in your <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">.env</code> file.
+                      💡 <strong>NVIDIA AI API required:</strong> this app uses NVIDIA's cloud-hosted Llama 3.3 70B model. Configure your key in the <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">.env</code> file.
                     </div>
                     <ol className="list-decimal pl-5 space-y-1 marker:text-amber-500/70">
                       <li>
-                        <strong>Ollama (recommended):</strong> install from{' '}
-                        <a href="https://ollama.com/download" target="_blank" rel="noopener noreferrer" className="underline hover:text-white font-bold inline-flex items-center gap-0.5">ollama.com <ExternalLink className="w-2.5 h-2.5" /></a>, then run{' '}
-                        <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">ollama serve</code> and{' '}
-                        <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">ollama pull llama3.1</code>. Set{' '}
-                        <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">LOCAL_LLM_URL=http://localhost:11434</code> and{' '}
-                        <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">LOCAL_LLM_MODEL=llama3.1</code>.
+                        <strong>Get a free NVIDIA API key</strong> (includes free credits):{' '}
+                        <a href="https://build.nvidia.com" target="_blank" rel="noopener noreferrer" className="underline hover:text-white font-bold inline-flex items-center gap-0.5">build.nvidia.com <ExternalLink className="w-2.5 h-2.5" /></a>
                       </li>
                       <li>
-                        <strong>LM Studio:</strong> download from{' '}
-                        <a href="https://lmstudio.ai" target="_blank" rel="noopener noreferrer" className="underline hover:text-white font-bold inline-flex items-center gap-0.5">lmstudio.ai <ExternalLink className="w-2.5 h-2.5" /></a>, load any model that supports JSON mode, enable the local server in the <em>Developer</em> tab, then set{' '}
-                        <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">LOCAL_LLM_URL=http://localhost:1234/v1</code> and{' '}
-                        <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">LOCAL_LLM_MODEL=&lt;the-model-name&gt;</code>.
+                        Set <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">NVIDIA_API_KEY=nvapi-...</code> in your <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">.env</code> file.
+                      </li>
+                      <li>
+                        (Optional) The default model is <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">meta/llama-3.3-70b-instruct</code>. Override with <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">NVIDIA_MODEL</code> and <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">NVIDIA_BASE_URL</code>.
                       </li>
                     </ol>
                     <div className="italic text-amber-300/90">
-                      The model must support JSON output mode (<code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">response_format: json_object</code>). Recommended: <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">llama3.1</code>, <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">qwen2.5</code>, or <code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">mistral</code>.
+                      The 70B Llama 3.3 model supports native JSON mode (<code className="bg-amber-500/10 px-1 py-0.5 rounded text-amber-300 font-mono">response_format: json_object</code>) for fast, reliable structured output.
                     </div>
                   </div>
                 )}
