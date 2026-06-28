@@ -1,0 +1,6 @@
+{
+  "name": "Rank & Rent Operations Hub",
+  "description": "An automated Rank & Rent platform for keyword research, lead scraping, landing page building, call tracking, and outreach automation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_LOCAL_LLM"]
+}
