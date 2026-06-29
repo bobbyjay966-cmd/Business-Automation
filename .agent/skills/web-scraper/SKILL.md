@@ -1,24 +1,38 @@
----
-name: web-scraper
-description: Real-world business lookup, search result parsing, and homepage contact information crawler (emails and phone numbers).
----
+name: local-lead-scraper-and-scoring-engine
+description: Automated local business scraper optimized for extracting contact channels and algorithmically rating B2B lead viability for call-forwarding and automation services.
+​Local Lead Scraper & Scoring Engine
+​This skill extracts targeted local business listings across defined geographic regions, harvests direct communication channels, and applies a multi-factor viability heuristic to score leads specifically for automated call-forwarding and lead-routing solutions.
+​Use this skill when:
+​Hunting high-intent local service niches (e.g., HVAC, plumbing, roofing, towing, locksmiths) for targeted B2B client acquisition.
+​Aggregating clean, non-duplicative phone numbers and email addresses directly from live organic footprints.
+​Algorithmically qualifying prospects based on missed-revenue vulnerability (raw landlines, high-velocity local intent, lack of automated call infrastructure).
+​Instructions:
+​1. Targeted Search Phase
+​Execute fetchRealSearchSnippets using hyper-localized queries: "[Niche] in [City, State]".
+​Prioritize high-turnover, immediate-need industries where a missed call equals instant lost revenue for the business owner.
+​Isolate the top organic search domains. Filter out major online directories (e.g., Yelp, YellowPages, Angi, Houzz) at the regex level during snippet parsing to ensure processing cycles are spent exclusively on direct business assets.
+​2. Deep Extraction & Crawl Phase
+​Asynchronously query the filtered target domains concurrently.
+​Implement a rigid 5-second connection timeout and mirror a modern enterprise-grade User-Agent string to circumvent basic script-blocking and anti-scraping firewalls.
+​Parse the raw HTML payload:
+​Phone Numbers: Extract using the primary US format match: /(?:\+?1[-.\s]?)?\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})/
+​Emails: Extract clean strings using: /\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b/. Programmatically discard standard asset matches disguised as emails (e.g., strings ending in .jpg, .png, .webp, .gif).
+​3. Lead Viability Heuristic (Call-Forwarding Scoring Engine)
+​Evaluate each parsed business record on a scale of 0 to 100 based on operational vulnerability indicators:
+​Phone Presence (Mandatory - Baseline Rule): The system must verify an active phone number asset. If no direct phone number is extracted, immediately drop the score to 0 and terminate processing for that record.
+​High-Intent Niche Factor (+40 points): Assign maximum weight to emergency-response and high-ticket local service sectors (e.g., 24/7 Towing, Emergency Plumbing, Roof Repair) where booking success is entirely dictated by rapid phone availability.
+​Automation Deficit Detection (+40 points): Analyze the page source code for the absence of call tracking, interactive voice response (IVR) platforms, or unified communication scripts (e.g., missing Twilio, RingCentral, or specialized software snippets). If the site relies on a raw, un-tracked static tel: link, award maximum points for automation deficit.
+​Lead Capture Gap (+20 points): Check for the total absence of interactive digital booking widgets, modern CRM forms, or live chat modules. High points here indicate the business is completely dependent on raw incoming voice calls to secure revenue, making them ideal clients for a bulletproof forwarding engine.
+​4. Direct Action Output Formatting
+​Construct the final structural JSON array containing 100% verified, live data. No placeholder metrics, mock fields, or empty dummy values are permitted. Every object must output exactly:
 
-# Web Scraper Skill
-
-This skill performs accurate, real-world local business lookup and crawls their official website homepages to extract verified contact information (phone numbers and emails).
-
-## Use this skill when:
-- Gathering real local business listings for lead generation.
-- Qualify leads based on GMB status, review counts, and website existence.
-- Crawling business websites for emails, addresses, and phone numbers.
-- Replacing simulated/mock data with actual live web content.
-
-## Instructions:
-1. **Search Phase**: Use `fetchRealSearchSnippets` to query DuckDuckGo for the city/niche keywords and obtain organic search titles and decoded target domains.
-2. **Parsing Phase**: Extract listing blocks. Clean the title to get the actual business name. Parse target domain URLs.
-3. **Crawl Phase (Direct Site Scrape)**: For every domain found, make an asynchronous GET request to the homepage. Set a realistic `User-Agent` and a 5-second connection timeout.
-4. **Extraction Phase**:
-   - Strip scripts, styles, and tags to get clean visible text.
-   - Run a strict US phone number regex: `/(?:\+?1[-.\s]?)?\(?([0-9]{3})\)?[-.\s]?([0-9]{3})[-.\s]?([0-9]{4})/`
-   - Run a strict email regex: `/\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b/` (filter out static assets like image extensions).
-5. **Formatting Phase**: Merge the parsed details, fallback to templates if search is completely down, and ensure no fake placeholder phone numbers are ever returned.
+[
+  {
+    "business_name": "Cleaned Business Name String",
+    "city_location": "Target Market City, State",
+    "phone_number": "Verified Direct Dial Number",
+    "email_address": "Extracted Communication Channel or null",
+    "viability_score": 85,
+    "pitch_trigger": "High-intent emergency niche operating on un-tracked static landline channel with zero digital lead capture alternatives."
+  }
+]
