@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { NicheCityTarget, ScrapedLead, TrackingNumber, CallLog, GeneratedSite, OperatorNotification } from '../types';
-import { Cpu, Play, Square, TrendingUp, DollarSign, Activity, CheckCircle, Database, Phone, Globe, Mail, Users, Bell, FileText, Server, ServerOff } from 'lucide-react';
+import { Cpu, Play, Square, TrendingUp, DollarSign, Activity, AlertCircle, CheckCircle, Database, Phone, Globe, Mail, Users, Bell, FileText, Server, ServerOff } from 'lucide-react';
 
 type AutopilotLogType = 'info' | 'success' | 'warn' | 'income' | 'process';
 
@@ -23,6 +23,7 @@ interface ServerCycleResult {
 interface ServerStatus {
   isAutopilotOn: boolean;
   isAutoPitchOn: boolean;
+  isAutoSubscribeOn: boolean;
   backend: string;
   intervalMs: number;
   lastCycle: ServerCycleResult | null;
@@ -45,6 +46,7 @@ interface AutopilotViewProps {
   onAddNumber: (num: Omit<TrackingNumber, 'id' | 'createdAt' | 'isActive'>) => Promise<any>;
   onGenerateSite: (targetId: string, trackingNumberId: string) => Promise<any>;
   onSendTrialEmail: (prospectId: string, siteUrl: string, niche: string, city: string) => Promise<any>;
+  onAutoSubscribe: (prospectId: string, targetId?: string, siteId?: string) => Promise<any>;
   onRefreshData: () => Promise<void>;
 }
 
@@ -68,6 +70,7 @@ export default function AutopilotView({
   onAddNumber,
   onGenerateSite,
   onSendTrialEmail,
+  onAutoSubscribe,
   onRefreshData,
 }: AutopilotViewProps) {
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
@@ -78,6 +81,7 @@ export default function AutopilotView({
 
   const isAutopilotOn = serverStatus?.isAutopilotOn ?? false;
   const isAutoPitchOn = serverStatus?.isAutoPitchOn ?? true;
+  const isAutoSubscribeOn = serverStatus?.isAutoSubscribeOn ?? true;
   const isServerCycleRunning = serverStatus?.isCycleRunning ?? false;
 
   const [optimisticAutopilotOn, setOptimisticAutopilotOn] = useState<boolean | null>(null);
@@ -130,9 +134,10 @@ export default function AutopilotView({
   useEffect(() => {
     localStorage.setItem('rankrent_autopilot_active', String(displayAutopilotOn));
     localStorage.setItem('rankrent_autopitch_active', String(isAutoPitchOn));
-  }, [displayAutopilotOn, isAutoPitchOn]);
+    localStorage.setItem('rankrent_autosubscribe_active', String(isAutoSubscribeOn));
+  }, [displayAutopilotOn, isAutoPitchOn, isAutoSubscribeOn]);
 
-  const setServerSetting = async (patch: Partial<Pick<ServerStatus, 'isAutopilotOn' | 'isAutoPitchOn'>>) => {
+  const setServerSetting = async (patch: Partial<Pick<ServerStatus, 'isAutopilotOn' | 'isAutoPitchOn' | 'isAutoSubscribeOn'>>) => {
     if (isToggling) return;
     setIsToggling(true);
     if (typeof patch.isAutopilotOn === 'boolean') {
