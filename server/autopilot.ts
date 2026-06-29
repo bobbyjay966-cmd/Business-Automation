@@ -65,6 +65,10 @@ import {
   isCallRailEnabled,
   provisionCallRailTracker,
 } from './callrail';
+import {
+  isStripeLive,
+  findOrCreateStripeCustomer,
+} from './stripe-billing';
 
 // ----------------------------------------------------------------
 // Tunables
@@ -687,6 +691,93 @@ async function trySendTrialEmail(
   }
 }
 
+/**
+ * Create a Stripe customer for a prospect when everything else is done.
+ * Everything else done means:
+ * - Has email and phone
+ * - Has trackingNumber
+ * - Has siteUrl (and siteUrl !== 'failed')
+ * - Has trialEmailSent === true
+ * - Lacks stripeCustomerId
+ */
+async function tryCreateStripeCustomer(
+  log: ReturnType<typeof makeLogBuffer>,
+): Promise<boolean> {
+  const settings = await getSettings();
+  if (!settings.isAutoSubscribeOn) return false;
+
+  if (!isStripeLive()) {
+    log.push(
+      '👤 Stripe not configured (STRIPE_SECRET_KEY not set). Skipping Stripe customer creation.',
+      'warn',
+    );
+    await notifyOncePerDay('__global__', 'stripe_not_configured', {
+      type: 'system',
+      title: '👤 Stripe not configured',
+      message:
+        'STRIPE_SECRET_KEY is not set in .env. Without Stripe, the autopilot cannot ' +
+        'create Stripe customers.\n\n' +
+        'To enable: get your secret key from the Stripe dashboard and set STRIPE_SECRET_KEY in .env.',
+      metadata: { reason: 'stripe_not_configured' },
+    });
+    return true; // action taken (notification); cycle moves on
+  }
+
+  const prospects = await getProspects();
+  
+  // Find a prospect where everything else is done, but stripeCustomerId is missing.
+  const prospect = prospects.find(
+    (p) =>
+      p.email &&
+      p.phone &&
+      p.trackingNumber &&
+      p.siteUrl &&
+      p.siteUrl !== 'failed' &&
+      p.trialEmailSent &&
+      !p.stripeCustomerId
+  );
+  if (!prospect) return false;
+
+  log.push(
+    `👤 Creating Stripe customer record for "${prospect.name}" (${prospect.email})...`,
+    'process',
+  );
+  try {
+    const customer = await findOrCreateStripeCustomer(prospect);
+    prospect.stripeCustomerId = customer.id;
+    await saveProspect(prospect);
+
+    await recordOperatorNotification({
+      type: 'system',
+      title: `👤 Created Stripe Customer for "${prospect.name}"`,
+      message:
+        `Customer ID: ${customer.id}\n` +
+        `Email: ${customer.email || prospect.email}\n` +
+        `Auto-provisioned by autopilot.`,
+      metadata: { targetId: prospect.targetId, prospectId: prospect.id, stripeCustomerId: customer.id, source: 'autopilot' },
+    });
+
+    log.push(
+      `👤 Stripe customer created successfully: ${customer.id} for "${prospect.name}".`,
+      'success',
+    );
+    return true;
+  } catch (err: any) {
+    const errMsg = err?.message || String(err);
+    log.push(
+      `❌ Stripe customer creation failed for "${prospect.name}": ${errMsg}.`,
+      'warn',
+    );
+    await notifyOncePerDay(prospect.targetId, 'stripe_customer_creation_failed', {
+      type: 'system',
+      title: `🚫 Stripe customer creation failed for "${prospect.name}"`,
+      message: `Stripe returned an error: ${errMsg}`,
+      metadata: { prospectId: prospect.id, error: errMsg },
+    });
+    return true;
+  }
+}
+
 function finish(
   log: ReturnType<typeof makeLogBuffer>,
   start: number,
@@ -793,6 +884,13 @@ export async function runAutopilotCycle(): Promise<AutopilotCycleResult> {
       if (pitched) {
         return finish(log, start, 'pitch_lead',
           'Generated outreach pitch for a lead.');
+      }
+
+      // Priority 7: Create Stripe customer
+      const customerCreated = await tryCreateStripeCustomer(log);
+      if (customerCreated) {
+        return finish(log, start, 'create_stripe_customer',
+          'Created Stripe customer record for a lead.');
       }
 
       // Nothing to do — all stages are caught up
