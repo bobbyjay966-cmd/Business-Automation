@@ -1,19 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { NicheCityTarget, ScrapedLead, TrackingNumber, CallLog, GeneratedSite, OperatorNotification } from '../types';
-import { Cpu, Play, Square, TrendingUp, DollarSign, Activity, AlertCircle, CheckCircle, Database, Phone, Globe, Mail, Users, Bell, FileText, ExternalLink, Sparkles, AlertTriangle, Undo2, Clock, RefreshCw, Server, ServerOff } from 'lucide-react';
-
-// ----------------------------------------------------------------
-// Server-side autopilot integration.
-//
-// Previously, this component owned the autopilot loop: a setInterval
-// in the browser that ran the decision tree every 12 seconds. That
-// died the moment the operator closed the tab.
-//
-// The loop now runs on the server (see server/autopilot.ts). This
-// component is purely a control panel + monitor — it reads the
-// server's status, lets the operator toggle persistent settings,
-// triggers manual runs, and renders the last cycle's logs.
-// ----------------------------------------------------------------
+import { Cpu, Play, Square, TrendingUp, DollarSign, Activity, CheckCircle, Database, Phone, Globe, Mail, Users, Bell, FileText, Server, ServerOff } from 'lucide-react';
 
 type AutopilotLogType = 'info' | 'success' | 'warn' | 'income' | 'process';
 
@@ -36,7 +23,6 @@ interface ServerCycleResult {
 interface ServerStatus {
   isAutopilotOn: boolean;
   isAutoPitchOn: boolean;
-  isAutoSubscribeOn: boolean;
   backend: string;
   intervalMs: number;
   lastCycle: ServerCycleResult | null;
@@ -59,7 +45,6 @@ interface AutopilotViewProps {
   onAddNumber: (num: Omit<TrackingNumber, 'id' | 'createdAt' | 'isActive'>) => Promise<any>;
   onGenerateSite: (targetId: string, trackingNumberId: string) => Promise<any>;
   onSendTrialEmail: (prospectId: string, siteUrl: string, niche: string, city: string) => Promise<any>;
-  onAutoSubscribe: (prospectId: string, targetId?: string, siteId?: string) => Promise<any>;
   onRefreshData: () => Promise<void>;
 }
 
@@ -68,17 +53,6 @@ interface LogEntry {
   timestamp: string;
   message: string;
   type: AutopilotLogType;
-}
-
-// Compact "X ago" formatter for the cron health pill. Operates against the
-// poll-supplied ageMs so the display stays stable even if the panel-clock
-// between polls drifts.
-function formatRelativeAge(ageMs: number): string {
-  if (!Number.isFinite(ageMs) || ageMs < 0) return '—';
-  if (ageMs < 60_000) return `${Math.max(0, Math.floor(ageMs / 1000))}s ago`;
-  if (ageMs < 3_600_000) return `${Math.floor(ageMs / 60_000)}m ago`;
-  if (ageMs < 86_400_000) return `${Math.floor(ageMs / 3_600_000)}h ago`;
-  return `${Math.floor(ageMs / 86_400_000)}d ago`;
 }
 
 export default function AutopilotView({
@@ -94,14 +68,8 @@ export default function AutopilotView({
   onAddNumber,
   onGenerateSite,
   onSendTrialEmail,
-  onAutoSubscribe,
   onRefreshData,
 }: AutopilotViewProps) {
-  // ----------------------------------------------------------------
-  // Server-side autopilot state. The truth lives on the server; we
-  // mirror it locally for instant UI feedback but re-sync on every
-  // status poll.
-  // ----------------------------------------------------------------
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
   const [isToggling, setIsToggling] = useState(false);
   const [isRunningCycle, setIsRunningCycle] = useState(false);
@@ -110,16 +78,11 @@ export default function AutopilotView({
 
   const isAutopilotOn = serverStatus?.isAutopilotOn ?? false;
   const isAutoPitchOn = serverStatus?.isAutoPitchOn ?? true;
-  const isAutoSubscribeOn = serverStatus?.isAutoSubscribeOn ?? true;
   const isServerCycleRunning = serverStatus?.isCycleRunning ?? false;
 
-  // Optimistic UI: keep the toggle visually responsive between the click
-  // and the server status round-trip. Server is the source of truth.
   const [optimisticAutopilotOn, setOptimisticAutopilotOn] = useState<boolean | null>(null);
   const displayAutopilotOn = optimisticAutopilotOn ?? isAutopilotOn;
 
-  // Server-side cycle trigger. Returns the cycle result so the UI can
-  // re-fetch dashboard data and surface the inline summary.
   const runServerCycle = useCallback(async (): Promise<ServerCycleResult | null> => {
     try {
       const res = await fetch('/api/autopilot/run', { method: 'POST' });
@@ -139,13 +102,13 @@ export default function AutopilotView({
       if (!res.ok) return;
       const data = (await res.json()) as ServerStatus;
       setServerStatus(data);
-      setOptimisticAutopilotOn(null); // server wins
+      setOptimisticAutopilotOn(null);
       if (data.lastCycle) {
         setLastServerLogs(data.lastCycle.logs);
         setLastServerSummary(data.lastCycle.summary);
       }
     } catch {
-      /* silent — pill keeps last known state */
+      /* silent */
     }
   }, []);
 
@@ -155,8 +118,6 @@ export default function AutopilotView({
     return () => clearInterval(id);
   }, [refreshServerStatus]);
 
-  // When a fresh cycle result lands, refresh the dashboard data so the
-  // MRR counters and notification feed reflect the new state.
   const lastCycleFinishedAtRef = useRef<string | null>(null);
   useEffect(() => {
     const finishedAt = serverStatus?.lastCycle?.finishedAt;
@@ -166,18 +127,12 @@ export default function AutopilotView({
     }
   }, [serverStatus?.lastCycle?.finishedAt, onRefreshData]);
 
-  // Persist a localStorage mirror so a hard refresh starts with the
-  // last-known toggle state. The server is the source of truth, this
-  // is purely cosmetic for the brief moment before /api/autopilot/status
-  // responds.
   useEffect(() => {
     localStorage.setItem('rankrent_autopilot_active', String(displayAutopilotOn));
     localStorage.setItem('rankrent_autopitch_active', String(isAutoPitchOn));
-    localStorage.setItem('rankrent_autosubscribe_active', String(isAutoSubscribeOn));
-  }, [displayAutopilotOn, isAutoPitchOn, isAutoSubscribeOn]);
+  }, [displayAutopilotOn, isAutoPitchOn]);
 
-  // Server-side toggle. Optimistic UI update first; revert on error.
-  const setServerSetting = async (patch: Partial<Pick<ServerStatus, 'isAutopilotOn' | 'isAutoPitchOn' | 'isAutoSubscribeOn'>>) => {
+  const setServerSetting = async (patch: Partial<Pick<ServerStatus, 'isAutopilotOn' | 'isAutoPitchOn'>>) => {
     if (isToggling) return;
     setIsToggling(true);
     if (typeof patch.isAutopilotOn === 'boolean') {
@@ -192,7 +147,7 @@ export default function AutopilotView({
       if (res.ok) {
         await refreshServerStatus();
       } else {
-        setOptimisticAutopilotOn(null); // revert
+        setOptimisticAutopilotOn(null);
       }
     } catch {
       setOptimisticAutopilotOn(null);
@@ -201,13 +156,8 @@ export default function AutopilotView({
     }
   };
 
-  // Logs (rendered by the existing terminal-style pane). Mirrors the
-  // server's most recent cycle output. Starts empty — the pane fills
-  // in as the server's status poll returns real cycle results.
   const [logs, setLogs] = useState<LogEntry[]>([]);
 
-  // Replace the static seed with the server's most recent cycle logs
-  // as soon as they arrive.
   useEffect(() => {
     if (lastServerLogs.length === 0) return;
     setLogs(
@@ -220,7 +170,6 @@ export default function AutopilotView({
     );
   }, [lastServerLogs]);
 
-  // Scroll to bottom of terminal whenever logs change
   const consoleEndRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (consoleEndRef.current) {
@@ -228,114 +177,6 @@ export default function AutopilotView({
     }
   }, [logs]);
 
-  // Manual-trigger UI state for /api/billing/reconcile. Discriminated union
-  // so the result panel can render without an extra "is set?" boolean.
-  type ReconcileUiState =
-    | { kind: 'idle' }
-    | { kind: 'running' }
-    | {
-        kind: 'result';
-        checked: number;
-        drifted: number;
-        errors: number;
-        skipped: boolean;
-        message?: string;
-      };
-  const [reconcileState, setReconcileState] = useState<ReconcileUiState>({ kind: 'idle' });
-
-  const handleReconcileNow = async () => {
-    if (reconcileState.kind === 'running') return;
-    setReconcileState({ kind: 'running' });
-    try {
-      const res = await fetch('/api/billing/reconcile', { method: 'POST' });
-      const data = await res.json().catch(() => null);
-      if (res.status === 409 && data?.skipped) {
-        setReconcileState({
-          kind: 'result',
-          checked: 0, drifted: 0, errors: 0, skipped: true,
-          message: data?.message || 'Reconciliation already in progress; retry shortly.',
-        });
-        return;
-      }
-      if (!res.ok || !data?.success) {
-        setReconcileState({
-          kind: 'result',
-          checked: Number(data?.checked) || 0,
-          drifted: Number(data?.drifted) || 0,
-          errors: Number(data?.errors) || 0,
-          skipped: false,
-          message: data?.error || `HTTP ${res.status}`,
-        });
-        return;
-      }
-      setReconcileState({
-        kind: 'result',
-        checked: Number(data?.checked) || 0,
-        drifted: Number(data?.drifted) || 0,
-        errors: Number(data?.errors) || 0,
-        skipped: false,
-        message: undefined,
-      });
-    } catch (e: any) {
-      setReconcileState({
-        kind: 'result',
-        checked: 0, drifted: 0, errors: 1, skipped: false,
-        message: `Network error: ${e?.message || e}`,
-      });
-    }
-  };
-
-  // Cron health pill: polls /api/admin/stripe-reconcile-status every 30s
-  // so the operator has at-a-glance visibility into Stripe reconciliation
-  // health without leaving the dashboard.
-  type CronStatusSnapshot = {
-    ageMs: number | null;
-    lastDriftedCount: number | null;
-    lastErrorsCount: number | null;
-    lastCheckedCount: number | null;
-    lastRunAt: string | null;
-    isCurrentlyReconciling: boolean;
-    isStale: boolean;
-    lastResult: string | null;
-    intervalMs: number;
-    nextExpectedRunAt: string | null;
-  };
-  const [cronStatus, setCronStatus] = useState<CronStatusSnapshot | null>(null);
-  const refreshCronStatus = async () => {
-    try {
-      const res = await fetch('/api/admin/stripe-reconcile-status');
-      if (!res.ok) return;
-      const data = await res.json();
-      const ageMs =
-        typeof data?.ageMs === 'number' && Number.isFinite(data.ageMs)
-          ? data.ageMs
-          : data?.lastRunAt
-            ? Date.now() - new Date(data.lastRunAt).getTime()
-            : null;
-      setCronStatus({
-        ageMs,
-        lastDriftedCount: typeof data?.lastDriftedCount === 'number' ? data.lastDriftedCount : null,
-        lastErrorsCount: typeof data?.lastErrorsCount === 'number' ? data.lastErrorsCount : null,
-        lastCheckedCount: typeof data?.lastCheckedCount === 'number' ? data.lastCheckedCount : null,
-        lastRunAt: data?.lastRunAt ?? null,
-        isCurrentlyReconciling: !!data?.isCurrentlyReconciling,
-        isStale: !!data?.isStale,
-        lastResult: data?.lastResult ?? null,
-        intervalMs: typeof data?.intervalMs === 'number' && data.intervalMs > 0
-          ? data.intervalMs : 30 * 60 * 1000,
-        nextExpectedRunAt: data?.nextExpectedRunAt ?? null,
-      });
-    } catch {
-      /* silent */
-    }
-  };
-  useEffect(() => {
-    refreshCronStatus();
-    const interval = setInterval(refreshCronStatus, 30_000);
-    return () => clearInterval(interval);
-  }, []);
-
-  // Operator notification feed
   const [notifications, setNotifications] = useState<OperatorNotification[]>([]);
   const [operatorEmail, setOperatorEmail] = useState<string>('halvsiebobbproductions@gmail.com');
   const refreshNotifications = async () => {
@@ -356,27 +197,22 @@ export default function AutopilotView({
     return () => clearInterval(interval);
   }, []);
 
-  // Stats calculation based on actual DB state
   const rentedCount = prospects.filter(p => p.pitchStatus === 'Rented').length;
   const trialCount = prospects.filter(p => p.pitchStatus === 'Trial').length;
   const pitchCount = prospects.filter(p => p.pitchStatus === 'Pitched').length;
   const trackerCount = numbers.length;
   const completedCallsCount = calls.filter(c => c.status === 'completed').length;
 
-  // Monthly Recurring Revenue Model
   const rentedMRR = rentedCount * 450;
   const trialMRR = trialCount * 150;
   const trackerRetainerMRR = trackerCount * 49;
   const totalMRR = rentedMRR + trialMRR + trackerRetainerMRR;
 
-  // Lifetime Cumulative Earnings — pure sum of real revenue, no faked baseline.
   const callLeadRevenue = completedCallsCount * 5.00;
   const cumulativeRent = rentedCount * 900;
   const cumulativeTrials = trialCount * 300;
   const lifetimeEarnings = callLeadRevenue + cumulativeRent + cumulativeTrials;
 
-  // Tie "INTERVAL" badge to the actual server config (default 12s on
-  // long-lived hosts, the cron schedule on Vercel).
   const tickIntervalMs = serverStatus?.intervalMs ?? 12_000;
   const tickIntervalLabel =
     tickIntervalMs >= 60_000
@@ -445,10 +281,6 @@ export default function AutopilotView({
           </button>
         </div>
 
-        {/* Server-side execution indicator: shows whether the autopilot is
-            actually running on the server (independent of the toggle
-            above). On Vercel this reflects the cron schedule; on a
-            long-lived host it reflects the setInterval loop. */}
         <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px] font-mono text-slate-400">
           {serverStatus ? (
             <span className="inline-flex items-center gap-1.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-1 rounded-md">
@@ -680,167 +512,6 @@ export default function AutopilotView({
                 />
               </button>
             </div>
-            <div className="bg-emerald-600/10 border border-emerald-500/25 p-4 rounded-xl flex items-center justify-between gap-4">
-              <div className="space-y-0.5">
-                <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
-                  Auto-Subscription &amp; Invoice Pipeline
-                  <span className="bg-emerald-500/25 text-emerald-400 text-[8px] font-mono px-1.5 py-0.5 rounded border border-emerald-500/30">
-                    STRIPE BILLING
-                  </span>
-                </h4>
-                <p className="text-[10px] text-slate-400 leading-normal">
-                  When a target has a deployed site <strong>AND</strong> tracking line, automatically create a $450/mo Stripe subscription + invoice (due in 7 days, then monthly). Stripe emails the invoice to the customer; a copy is queued to{' '}
-                  <code className="text-emerald-300 font-mono text-[10px]">{operatorEmail}</code>.
-                </p>
-              </div>
-              <button
-                onClick={() => setServerSetting({ isAutoSubscribeOn: !isAutoSubscribeOn })}
-                className={`w-12 h-6 rounded-full p-1 transition-colors duration-200 focus:outline-none shrink-0 cursor-pointer ${
-                  isAutoSubscribeOn ? 'bg-emerald-600' : 'bg-slate-700'
-                }`}
-                title="Toggle Stripe auto-subscription (server-side)"
-              >
-                <div
-                  className={`bg-white w-4 h-4 rounded-full shadow-md transform transition-transform duration-200 ${
-                    isAutoSubscribeOn ? 'translate-x-6' : 'translate-x-0'
-                  }`}
-                />
-              </button>
-            </div>
-            <div
-              className={`font-mono text-[10px] rounded-md px-3 py-1.5 leading-relaxed flex flex-wrap items-center gap-x-2 gap-y-1 bg-white/[0.02] border-l-[3px] ${
-                !cronStatus
-                  ? 'border-l-white/10 text-slate-400'
-                  : cronStatus.isCurrentlyReconciling
-                    ? 'border-l-cyan-500/60 text-cyan-200 animate-pulse'
-                    : cronStatus.isStale
-                      ? 'border-l-rose-500/60 text-rose-300'
-                      : (cronStatus.lastDriftedCount ?? 0) > 0 ||
-                          (cronStatus.lastErrorsCount ?? 0) > 0
-                        ? 'border-l-amber-500/60 text-amber-300'
-                        : 'border-l-emerald-500/60 text-emerald-300'
-              }`}
-            >
-              <span className="font-bold whitespace-nowrap">
-                {!cronStatus
-                  ? '⌛ Cron health: initializing…'
-                  : cronStatus.isCurrentlyReconciling
-                    ? '🔄 Reconcile in progress…'
-                    : cronStatus.isStale
-                      ? '🚨 Cron stale'
-                      : (cronStatus.lastDriftedCount ?? 0) > 0 ||
-                          (cronStatus.lastErrorsCount ?? 0) > 0
-                        ? '⚠️ Last reconcile'
-                        : '✅ Last reconcile'}
-              </span>
-              {cronStatus?.lastRunAt && (
-                <span className="opacity-80 whitespace-nowrap">
-                  {formatRelativeAge(cronStatus.ageMs ?? 0)}
-                </span>
-              )}
-              {cronStatus?.lastRunAt && <span className="opacity-40">·</span>}
-              <span className="whitespace-nowrap">
-                drift{' '}
-                <span
-                  className={`font-bold ${
-                    (cronStatus?.lastDriftedCount ?? 0) > 0
-                      ? 'text-amber-200'
-                      : 'text-emerald-200'
-                  }`}
-                >
-                  {cronStatus?.lastDriftedCount ?? '—'}
-                </span>
-              </span>
-              <span className="opacity-40">·</span>
-              <span className="whitespace-nowrap">
-                err{' '}
-                <span
-                  className={`font-bold ${
-                    (cronStatus?.lastErrorsCount ?? 0) > 0
-                      ? 'text-rose-200'
-                      : 'text-emerald-200'
-                  }`}
-                >
-                  {cronStatus?.lastErrorsCount ?? '—'}
-                </span>
-              </span>
-            </div>
-            <div className="bg-cyan-600/10 border border-cyan-500/25 p-4 rounded-xl flex items-center justify-between gap-4">
-              <div className="space-y-0.5">
-                <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
-                  🔁 On-Demand Stripe Reconciliation
-                  <span className="bg-cyan-500/25 text-cyan-400 text-[8px] font-mono px-1.5 py-0.5 rounded border border-cyan-500/30">
-                    BACKSTOP
-                  </span>
-                </h4>
-                <p className="text-[10px] text-slate-400 leading-normal">
-                  Force an immediate poll against Stripe for any prospect with a stale active
-                  subscription. Useful right after a webhook outage so the operator dashboard
-                  catches up to actual Stripe state. Returns the drift count inline.
-                </p>
-              </div>
-              <button
-                onClick={handleReconcileNow}
-                disabled={reconcileState.kind === 'running'}
-                className="px-3 py-2 rounded-xl text-[11px] font-bold transition flex items-center justify-center gap-2 shadow-lg cursor-pointer bg-cyan-600 hover:bg-cyan-500 text-white shadow-cyan-900/20 disabled:opacity-50 border border-cyan-500/30"
-                title="POST /api/billing/reconcile (forces reconciliation immediately)"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${reconcileState.kind === 'running' ? 'animate-spin' : ''}`} />
-                {reconcileState.kind === 'running' ? 'Reconciling…' : 'Reconcile Now'}
-              </button>
-            </div>
-            {reconcileState.kind === 'result' && (
-              <div
-                className={`font-mono text-[10px] rounded-lg border px-3 py-2 leading-relaxed ${
-                  reconcileState.skipped
-                    ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
-                    : reconcileState.message
-                      ? 'bg-rose-500/10 border-rose-500/30 text-rose-300'
-                      : reconcileState.drifted > 0
-                        ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
-                        : reconcileState.errors > 0
-                          ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
-                          : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                }`}
-              >
-                {reconcileState.skipped ? (
-                  <>
-                    <span className="font-bold">⏭️ SKIPPED — </span>
-                    {reconcileState.message || 'Reconciliation already in progress; retry shortly.'}
-                  </>
-                ) : reconcileState.message ? (
-                  <>
-                    <span className="font-bold">❌ ERROR — </span>
-                    {reconcileState.message}
-                  </>
-                ) : (
-                  <>
-                    <span className="font-bold">
-                      {reconcileState.drifted > 0 || reconcileState.errors > 0
-                        ? '⚠️ RESULT —'
-                        : '✅ RECONCILED —'}
-                    </span>
-                    checked{' '}
-                    <span className="text-white">{reconcileState.checked}</span>, drifted{' '}
-                    <span
-                      className={`font-bold ${
-                        reconcileState.drifted > 0 ? 'text-amber-200' : 'text-emerald-200'
-                      }`}
-                    >
-                      {reconcileState.drifted}
-                    </span>
-                    , errors{' '}
-                    <span
-                      className={`font-bold ${
-                        reconcileState.errors > 0 ? 'text-rose-200' : 'text-emerald-200'
-                      }`}
-                    >
-                      {reconcileState.errors}
-                    </span>
-                  </>
-                )}
-              </div>
-            )}
           </div>
 
           <div className="space-y-4">
@@ -886,13 +557,6 @@ export default function AutopilotView({
               <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
               <span><strong>Pay-per-lead bridge:</strong> Every customer call automatically generates <strong>$5.00 passive cash flow</strong> to the portfolio balance.</span>
             </div>
-            <div className="flex gap-2 items-start mt-2">
-              <Sparkles className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-              <span>
-                <strong>Stripe auto-billing:</strong> When a target has a deployed site + tracking line, a $450/mo subscription + invoice is created. Stripe emails the customer; a copy is queued to{' '}
-                <code className="font-mono text-[10px] text-emerald-300">{operatorEmail}</code>.
-              </span>
-            </div>
           </div>
         </div>
       </div>
@@ -920,45 +584,24 @@ export default function AutopilotView({
         <div className="p-5 max-h-[420px] overflow-y-auto space-y-3 scrollbar-thin scrollbar-thumb-white/10">
           {notifications.length === 0 ? (
             <div className="text-slate-600 italic text-center py-10 text-xs font-mono">
-              No notifications yet. The first auto-subscription notification will appear here when the autopilot issues a Stripe subscription + invoice.
+              No notifications yet. System events will appear here.
             </div>
           ) : (
             notifications.slice(0, 12).map((n) => {
               const outcome: string | undefined =
                 typeof n.metadata?.outcome === 'string' ? n.metadata.outcome : undefined;
-              type Tone =
-                | 'success' | 'failure' | 'past_due' | 'refunded'
-                | 'invoice' | 'system' | 'domain_warn' | 'neutral';
+              type Tone = 'system' | 'neutral';
               let tone: Tone = 'neutral';
-              if (n.type === 'subscription_activated') tone = 'success';
-              else if (n.type === 'subscription_failed') {
-                if (outcome === 'refunded') tone = 'refunded';
-                else if (outcome === 'past_due' || outcome === 'incomplete') tone = 'past_due';
-                else tone = 'failure';
-              } else if (n.type === 'invoice_created') tone = 'invoice';
-              else if (n.type === 'system') tone = 'system';
-              else if (n.type === 'firebase_domain_warning') tone = 'domain_warn';
+              if (n.type === 'system') tone = 'system';
 
               const TONE_STYLE: Record<Tone, { border: string; bg: string; tint: string; chip: string }> = {
-                success:    { border: 'border-emerald-500/30', bg: 'bg-emerald-500/5',  tint: 'text-emerald-300', chip: '✅ ACTIVATED' },
-                failure:    { border: 'border-rose-500/30',     bg: 'bg-rose-500/5',      tint: 'text-rose-300',     chip: '❌ FAILED' },
-                past_due:   { border: 'border-amber-500/30',    bg: 'bg-amber-500/5',     tint: 'text-amber-300',    chip: '⚠️ RETRY' },
-                refunded:   { border: 'border-orange-500/30',   bg: 'bg-orange-500/5',    tint: 'text-orange-300',   chip: '↩️ REFUND' },
-                invoice:    { border: 'border-yellow-500/30',   bg: 'bg-yellow-500/5',    tint: 'text-yellow-300',   chip: '📨 INVOICE' },
                 system:     { border: 'border-slate-500/30',    bg: 'bg-slate-500/5',     tint: 'text-slate-300',    chip: outcome === 'uncollectible' ? '☠️ UNCOLLECTIBLE' : outcome === 'void' ? '🗑️ VOID' : '🛠️ SYSTEM' },
-                domain_warn:{ border: 'border-amber-500/30',    bg: 'bg-amber-500/5',     tint: 'text-amber-300',    chip: '🔐 AUTH' },
                 neutral:    { border: 'border-blue-500/30',     bg: 'bg-blue-500/5',      tint: 'text-blue-300',     chip: 'ℹ️ INFO' },
               };
               const toneStyle = TONE_STYLE[tone];
 
               const TONE_ICON: Record<Tone, React.ReactNode> = {
-                success:    <CheckCircle className="w-4 h-4 text-emerald-400" />,
-                failure:    <AlertCircle className="w-4 h-4 text-rose-400" />,
-                past_due:   <Clock className="w-4 h-4 text-amber-400" />,
-                refunded:   <Undo2 className="w-4 h-4 text-orange-400" />,
-                invoice:    <FileText className="w-4 h-4 text-yellow-400" />,
-                system:     <AlertTriangle className="w-4 h-4 text-slate-300" />,
-                domain_warn:<AlertCircle className="w-4 h-4 text-amber-400" />,
+                system:     <AlertCircle className="w-4 h-4 text-slate-300" />,
                 neutral:    <FileText className="w-4 h-4 text-blue-400" />,
               };
 
@@ -980,25 +623,6 @@ export default function AutopilotView({
                     </span>
                   </div>
                   <pre className="text-[11px] text-slate-300 whitespace-pre-wrap font-mono leading-relaxed">{n.message}</pre>
-                  {(n.metadata?.stripeInvoiceUrl || n.metadata?.stripeChargeId) && (
-                    <div className="mt-2 flex flex-wrap items-center gap-3 text-[10px] font-mono">
-                      {n.metadata?.stripeInvoiceUrl ? (
-                        <a
-                          href={n.metadata.stripeInvoiceUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-emerald-300 hover:text-emerald-200 underline flex items-center gap-1"
-                        >
-                          <ExternalLink className="w-3 h-3" /> Open hosted invoice
-                        </a>
-                      ) : null}
-                      {n.metadata?.stripeChargeId && (
-                        <span className="text-orange-300/80 flex items-center gap-1">
-                          <Undo2 className="w-3 h-3" /> Refund charge: <span className="font-mono">{String(n.metadata.stripeChargeId)}</span>
-                        </span>
-                      )}
-                    </div>
-                  )}
                 </div>
               );
             })
