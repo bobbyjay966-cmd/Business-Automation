@@ -425,6 +425,29 @@ async function tryPitchOne(
   }
 }
 
+// Debounce helper for `system` notifications so missing-prerequisite
+// warnings don't spam the operator feed. Keeps one notification per
+// (targetId, errorkey) tuple per 24h.
+async function notifyOncePerDay(
+  targetId: string,
+  key: string,
+  partial: Omit<OperatorNotification, 'id' | 'createdAt' | 'read'>,
+): Promise<void> {
+  const since = Date.now() - 24 * 60 * 60 * 1000;
+  const notes = await getNotifications();
+  const alreadyNotified = notes.some(
+    (n) =>
+      n.metadata?.targetId === targetId
+      && n.metadata?.reason === key
+      && new Date(n.createdAt).getTime() >= since,
+  );
+  if (alreadyNotified) return;
+  await recordOperatorNotification({
+    ...partial,
+    metadata: { ...(partial.metadata ?? {}), targetId, reason: key },
+  });
+}
+
 /**
  * Provision a real CallRail tracking line for ONE prospect.
  * The tracker will forward calls directly to the prospect's real phone number.
@@ -437,4 +460,435 @@ async function tryProvisionTrackingLine(
       '📞 CallRail not configured (CALLRAIL_API_KEY not set). Skipping tracker provisioning.',
       'warn',
     );
-    await notifyOncePerDay('__global__', 'callrail_not
+    await notifyOncePerDay('__global__', 'callrail_not_configured', {
+      type: 'system',
+      title: '📞 CallRail not configured',
+      message:
+        'CALLRAIL_API_KEY is not set in .env. Without CallRail, the autopilot cannot ' +
+        'provision real tracking numbers. Sites will not be built.\n\n' +
+        'To enable: get your API key from https://app.callrail.com/settings/api-access ' +
+        'and set CALLRAIL_API_KEY in .env.',
+      metadata: { reason: 'callrail_not_configured' },
+    });
+    return true; // action taken (notification); cycle moves on
+  }
+
+  const prospects = await getProspects();
+  
+  // Find a prospect that has phone and email, is Scraped or Pitched, and lacks trackingNumber.
+  const prospect = prospects.find(
+    (p) =>
+      p.phone &&
+      p.email &&
+      !p.trackingNumber &&
+      (p.pitchStatus === 'Scraped' || p.pitchStatus === 'Pitched')
+  );
+  if (!prospect) return false;
+
+  log.push(
+    `📞 Provisioning real CallRail line for "${prospect.name}" forwarding to ${prospect.phone}...`,
+    'process',
+  );
+  try {
+    const { phoneNumber } = await provisionCallRailTracker({
+      name: `${prospect.name} (${prospect.city} ${prospect.niche}) Forwarder`,
+      areaCode: areaCodeForCity(prospect.city),
+      forwardTo: prospect.phone,
+      whisperMessage: `Call from Rank & Rent ${prospect.city} ${prospect.niche} Leads.`,
+      recordCalls: true,
+    });
+
+    prospect.trackingNumber = phoneNumber;
+    await saveProspect(prospect);
+
+    const newNum: TrackingNumber = {
+      id: `num-${Date.now()}`,
+      targetId: prospect.targetId,
+      phoneNumber,
+      friendlyName: `${prospect.name} (${prospect.city} ${prospect.niche}) Forwarder`,
+      forwardTo: prospect.phone,
+      whisperMessage: `Call from Rank & Rent ${prospect.city} ${prospect.niche} Leads.`,
+      recordCalls: true,
+      isActive: true,
+      createdAt: new Date().toISOString(),
+    };
+    await saveNumber(newNum);
+
+    await recordOperatorNotification({
+      type: 'invoice_created',
+      title: `📞 Provisioned CallRail line for "${prospect.name}"`,
+      message:
+        `Real tracking number: ${phoneNumber}\n` +
+        `Forwarding to: ${prospect.phone}\n` +
+        `Auto-provisioned by autopilot. Next cycle will build the site.`,
+      metadata: { targetId: prospect.targetId, prospectId: prospect.id, phoneNumber, forwardTo: prospect.phone, source: 'autopilot' },
+    });
+
+    log.push(
+      `📞 CallRail tracker provisioned: ${phoneNumber} forwarding to ${prospect.phone}.`,
+      'success',
+    );
+    return true;
+  } catch (err: any) {
+    const errMsg = err?.message || String(err);
+    log.push(
+      `❌ CallRail provisioning failed for "${prospect.name}": ${errMsg}.`,
+      'warn',
+    );
+    await notifyOncePerDay(prospect.targetId, 'callrail_provisioning_failed', {
+      type: 'system',
+      title: `🚫 CallRail provisioning failed for "${prospect.name}"`,
+      message: `CallRail returned an error: ${errMsg}\n\nMake sure your CallRail billing details/credit card are up to date.`,
+      metadata: { prospectId: prospect.id, error: errMsg },
+    });
+    return true;
+  }
+}
+
+/**
+ * Build ONE site per cycle for a specific prospect. Generates the landing page,
+ * inserts the prospect's CallRail tracking line, and deploys to Vercel.
+ */
+async function tryBuildSite(
+  log: ReturnType<typeof makeLogBuffer>,
+): Promise<boolean> {
+  const prospects = await getProspects();
+  
+  // Find a prospect that has phone, email, and trackingNumber, is Scraped or Pitched, and lacks siteUrl.
+  const prospect = prospects.find(
+    (p) =>
+      p.phone &&
+      p.email &&
+      p.trackingNumber &&
+      !p.siteUrl &&
+      p.siteUrl !== 'failed' &&
+      (p.pitchStatus === 'Scraped' || p.pitchStatus === 'Pitched')
+  );
+  if (!prospect) return false;
+
+  log.push(
+    `🏗️ AI SITE BUILDER: Compiling SEO-optimized landing page for "${prospect.name}" in "${prospect.city}"...`,
+    'info',
+  );
+  try {
+    const whisperMessage = `Call from Rank & Rent ${prospect.city} ${prospect.niche} Leads.`;
+    const generated = await generateLandingPage(
+      prospect.niche,
+      prospect.city,
+      prospect.trackingNumber!,
+      whisperMessage,
+    );
+    generated.targetId = prospect.targetId;
+
+    let deploymentUrl = '';
+
+    if (process.env.VERCEL_API_KEY) {
+      try {
+        const cleanName =
+          `${prospect.city.toLowerCase()}-${prospect.niche.toLowerCase()}-${prospect.name.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 10)}-${Date.now().toString().slice(-4)}`
+            .replace(/[^a-z0-9-]/g, '-')
+            .replace(/-+/g, '-')
+            .replace(/^-|-$/g, '');
+        const vercelRes = await fetch('https://api.vercel.com/v13/deployments', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${process.env.VERCEL_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            name: cleanName,
+            files: [
+              { file: 'index.html', data: generated.htmlCode, encoding: 'utf-8' },
+            ],
+            projectSettings: { framework: null },
+          }),
+        });
+        if (vercelRes.ok) {
+          const data: any = await vercelRes.json();
+          if (data?.url) {
+            generated.domainName = data.url;
+            (generated as any).deploymentUrl = data.url;
+            deploymentUrl = data.url;
+          }
+        } else {
+          const errText = await vercelRes.text();
+          log.push(`⚠️ Vercel deployment error details: ${errText}`, 'warn');
+        }
+      } catch (vErr: any) {
+        log.push(`⚠️ Vercel deploy failed: ${vErr?.message || vErr}.`, 'warn');
+      }
+    }
+
+    if (!deploymentUrl) {
+      deploymentUrl = `${prospect.city.toLowerCase()}-${prospect.niche.toLowerCase()}-${prospect.id.slice(-4)}.vercel.app`;
+      generated.domainName = deploymentUrl;
+      generated.deploymentUrl = deploymentUrl;
+    }
+
+    await saveSite(generated);
+
+    prospect.siteUrl = deploymentUrl.startsWith('http') ? deploymentUrl : `https://${deploymentUrl}`;
+    await saveProspect(prospect);
+
+    log.push(
+      `🎉 Landing page generated and deployed to ${prospect.siteUrl} for "${prospect.name}".`,
+      'success',
+    );
+    return true;
+  } catch (err: any) {
+    log.push(`❌ Site generation failed for "${prospect.name}": ${err?.message || err}. Marking as failed to unstick pipeline.`, 'warn');
+    prospect.siteUrl = 'failed';
+    await saveProspect(prospect);
+    return true;
+  }
+}
+
+/**
+ * Generate (and queue) a trial offer email for ONE prospect per cycle.
+ * Contains the custom Vercel app URL.
+ */
+async function trySendTrialEmail(
+  log: ReturnType<typeof makeLogBuffer>,
+): Promise<boolean> {
+  const prospects = await getProspects();
+
+  // Find a prospect that has a siteUrl, is Scraped or Pitched, and hasn't had the trial email sent.
+  const prospect = prospects.find(
+    (p) =>
+      p.siteUrl &&
+      p.siteUrl !== 'failed' &&
+      !p.trialEmailSent &&
+      (p.pitchStatus === 'Scraped' || p.pitchStatus === 'Pitched')
+  );
+  if (!prospect) return false;
+
+  const siteUrl = prospect.siteUrl;
+
+  log.push(
+    `📧 Generating trial offer email for "${prospect.name}" → ${siteUrl}...`,
+    'info',
+  );
+  try {
+    const email = await generateTrialOfferEmail(
+      prospect,
+      siteUrl,
+      prospect.niche,
+      prospect.city,
+    );
+    prospect.trialEmailContent = email.emailContent;
+    prospect.trialEmailSent = true;
+    prospect.pitchStatus = 'Trial';
+    await saveProspect(prospect);
+    log.push(`📧 Trial offer email sent for "${prospect.name}".`, 'success');
+    return true;
+  } catch (err: any) {
+    log.push(`❌ Trial email failed for "${prospect.name}": ${err?.message || err}.`, 'warn');
+    return true;
+  }
+}
+
+function finish(
+  log: ReturnType<typeof makeLogBuffer>,
+  start: number,
+  action: AutopilotCycleResult['action'],
+  summary: string,
+): AutopilotCycleResult {
+  return {
+    ranAction: action !== 'noop' && action !== 'idle_scan' && action !== 'skipped_off' && action !== 'skipped_timeout',
+    action,
+    summary,
+    logs: log.logs,
+    durationMs: Date.now() - start,
+    finishedAt: new Date().toISOString(),
+  };
+}
+
+function timeoutResult(
+  log: ReturnType<typeof makeLogBuffer>,
+  start: number,
+): AutopilotCycleResult {
+  return {
+    ranAction: false,
+    action: 'skipped_timeout',
+    summary: 'Cycle timed out before completing.',
+    logs: log.logs,
+    durationMs: Date.now() - start,
+    finishedAt: new Date().toISOString(),
+  };
+}
+
+// ----------------------------------------------------------------
+// Main cycle orchestrator — one action per tick
+// ----------------------------------------------------------------
+
+/**
+ * Run exactly ONE autopilot action. Each invocation walks the decision
+ * tree in priority order and stops as soon as one stage reports success.
+ * A hard timeout (CYCLE_TIMEOUT_MS) prevents runaway LLM calls from
+ * blocking the loop forever.
+ *
+ * Priority order:
+ * 1. Add a new niche × city target (grow portfolio)
+ * 2. Scrape fresh leads for the most eligible target
+ * 3. Send trial offer email
+ * 4. Build a landing page for a target
+ * 5. Provision a CallRail tracking line for a target
+ * 6. Pitch one lead
+ */
+export async function runAutopilotCycle(): Promise<AutopilotCycleResult> {
+  const log = makeLogBuffer();
+  const start = Date.now();
+
+  // Hard timeout wrapper — the caller (setInterval or cron) shouldn't
+  // wait forever if the LLM API hangs.
+  const timeoutPromise = new Promise<AutopilotCycleResult>((resolve) => {
+    setTimeout(() => resolve(timeoutResult(log, start)), CYCLE_TIMEOUT_MS);
+  });
+
+  const workPromise = (async (): Promise<AutopilotCycleResult> => {
+    try {
+      const settings = await getSettings();
+      if (!settings.isAutopilotOn) {
+        log.push('Autopilot disabled — skipping cycle.', 'info');
+        return finish(log, start, 'skipped_off', 'Autopilot is turned off.');
+      }
+
+      // Priority 1: Add a new target
+      const newTarget = await tryAddTarget(log);
+      if (newTarget) {
+        return finish(log, start, 'add_target',
+          `Added new target market: ${newTarget.niche} in ${newTarget.city}.`);
+      }
+
+      // Priority 2: Scrape leads for a target
+      const scrapeResult = await tryScrapeForTarget(log);
+      if (scrapeResult) {
+        return finish(log, start, 'scrape_target',
+          `Scraped ${scrapeResult.newLeadCount} new leads for ${scrapeResult.target.niche} in ${scrapeResult.target.city}.`);
+      }
+
+      // Priority 3: Send trial offer email
+      const trialSent = await trySendTrialEmail(log);
+      if (trialSent) {
+        return finish(log, start, 'send_trial_email',
+          'Queued trial offer email.');
+      }
+
+      // Priority 4: Build a landing page
+      const siteResult = await tryBuildSite(log);
+      if (siteResult) {
+        return finish(log, start, 'build_site',
+          'Built landing page for a lead.');
+      }
+
+      // Priority 5: Provision a CallRail tracking line
+      const lineProvisioned = await tryProvisionTrackingLine(log);
+      if (lineProvisioned) {
+        return finish(log, start, 'provision_line',
+          'Provisioned CallRail tracking line for a lead.');
+      }
+
+      // Priority 6: Pitch one lead
+      const pitched = await tryPitchOne(log);
+      if (pitched) {
+        return finish(log, start, 'pitch_lead',
+          'Generated outreach pitch for a lead.');
+      }
+
+      // Nothing to do — all stages are caught up
+      log.push('No actionable tasks found. All targets are healthy.', 'info');
+      return finish(log, start, 'idle_scan',
+        'All targets are healthy — no actions needed.');
+    } catch (err: any) {
+      log.push(`Unexpected cycle error: ${err?.message || err}`, 'warn');
+      return finish(log, start, 'noop',
+        `Cycle aborted: ${err?.message || err}`);
+    }
+  })();
+
+  return Promise.race([workPromise, timeoutPromise]);
+}
+
+// ----------------------------------------------------------------
+// Status snapshot for the client UI
+// ----------------------------------------------------------------
+
+export interface AutopilotStatusSnapshot {
+  isAutopilotOn: boolean;
+  isAutoPitchOn: boolean;
+  isAutoSubscribeOn: boolean;
+  backend: string;
+  lastCycle: AutopilotCycleResult | null;
+  isCycleRunning: boolean;
+  nextRunEstimateMs: number | null;
+  uptimeMs: number;
+  startedAt: string;
+}
+
+const bootTime = Date.now();
+let lastCycle: AutopilotCycleResult | null = null;
+let isCycleRunning = false;
+
+export function recordCycleResult(result: AutopilotCycleResult) {
+  lastCycle = result;
+  isCycleRunning = false;
+}
+
+export async function getAutopilotStatus(intervalMs: number): Promise<AutopilotStatusSnapshot> {
+  const settings = await getSettings();
+  // When autopilot is ON, suppress a stale 'skipped_off' cycle result so
+  // the UI doesn't keep showing "Autopilot disabled — skipping cycle."
+  // while waiting for the next tick.
+  const activeLastCycle =
+    settings.isAutopilotOn && lastCycle?.action === 'skipped_off'
+      ? null
+      : lastCycle;
+  return {
+    isAutopilotOn: settings.isAutopilotOn,
+    isAutoPitchOn: settings.isAutoPitchOn,
+    isAutoSubscribeOn: settings.isAutoSubscribeOn,
+    backend: (process.env.DB_TYPE || 'json').toLowerCase(),
+    lastCycle: activeLastCycle,
+    isCycleRunning,
+    nextRunEstimateMs: activeLastCycle
+      ? Math.max(0, activeLastCycle.finishedAt ? intervalMs - (Date.now() - new Date(activeLastCycle.finishedAt).getTime()) : 0)
+      : null,
+    uptimeMs: Date.now() - bootTime,
+    startedAt: new Date(bootTime).toISOString(),
+  };
+}
+
+/**
+ * Start a setInterval-based autopilot loop. Intended for the long-lived
+ * process path (local dev, Railway, Render, Fly.io, your own VPS). On
+ * Vercel this is a no-op because functions don't keep timers alive
+ * between invocations; there, the cron endpoint handles tick scheduling.
+ */
+export function startAutopilotLoop(intervalMs = 12_000) {
+  if (process.env.VERCEL === '1' || process.env.VERCEL === 'true') {
+    console.log('[autopilot] Vercel environment — skipping setInterval, using cron endpoint instead.');
+    return;
+  }
+  console.log(`[autopilot] Background loop enabled: every ${intervalMs / 1000}s.`);
+
+  // First run shortly after boot, then on interval.
+  setTimeout(() => {
+    runAutopilotCycle()
+      .then((r) => {
+        recordCycleResult(r);
+        console.log(`[autopilot] initial cycle: ${r.action} (${r.durationMs}ms)`);
+      })
+      .catch((e) => console.warn('[autopilot] initial cycle error:', e?.message || e));
+  }, 1_500);
+
+  setInterval(() => {
+    runAutopilotCycle()
+      .then((r) => {
+        recordCycleResult(r);
+        if (r.ranAction) {
+          console.log(`[autopilot] cycle: ${r.action} (${r.durationMs}ms)`);
+        }
+      })
+      .catch((e) => console.warn('[autopilot] interval cycle error:', e?.message || e));
+  }, intervalMs);
+}
