@@ -5,10 +5,10 @@
  * `setInterval` running in the browser. That meant closing the tab
  * stopped the entire pipeline. This module moves the same decision tree
  * to the server, where it can be driven by:
- *   - a `setInterval` started in `server.ts` on boot (traditional host /
- *     local dev), or
- *   - an external cron ping against `POST /api/cron/autopilot` (Vercel /
- *     any serverless deploy where you can't keep a process alive).
+ * - a `setInterval` started in `server.ts` on boot (traditional host /
+ * local dev), or
+ * - an external cron ping against `POST /api/cron/autopilot` (Vercel /
+ * any serverless deploy where you can't keep a process alive).
  *
  * Each invocation of `runAutopilotCycle()` performs EXACTLY ONE action.
  * That's intentional: serverless functions have hard timeouts (Vercel
@@ -19,19 +19,19 @@
  * state.
  *
  * BUG FIXES in this rewrite (vs the previous one-shot version):
- *   - `tryScrapeForTarget` re-scrapes stale targets every 24h and
- *     deduplicates against existing prospects so lead flow is
- *     continuous, not a single one-shot event.
- *   - `tryProvisionTrackingLine` actually POSTs to CallRail when
- *     CALLRAIL_API_KEY + OPERATOR_PHONE are set; previously the cycle
- *     deadlocked on the "no line" warning.
- *   - Each phase (scrape, pitch, provision, build site, trial email,
- *     auto-subscribe) is a separate action so a single tick cannot
- *     exceed one LLM call + at most two web-API calls (CallRail /
- *     Vercel).
- *   - `tryAddTarget` now grows the portfolio continuously instead of
- *     capping at 8, with a 50-target ceiling to keep the DB well within
- *     Upstash's 1MB single-key limit.
+ * - `tryScrapeForTarget` re-scrapes stale targets every 24h and
+ * deduplicates against existing prospects so lead flow is
+ * continuous, not a single one-shot event.
+ * - `tryProvisionTrackingLine` actually POSTs to CallRail when
+ * CALLRAIL_API_KEY + OPERATOR_PHONE are set; previously the cycle
+ * deadlocked on the "no line" warning.
+ * - Each phase (scrape, pitch, provision, build site, trial email,
+ * auto-subscribe) is a separate action so a single tick cannot
+ * exceed one LLM call + at most two web-API calls (CallRail /
+ * Vercel).
+ * - `tryAddTarget` now grows the portfolio continuously instead of
+ * capping at 8, with a 50-target ceiling to keep the DB well within
+ * Upstash's 1MB single-key limit.
  */
 import {
   NicheCityTarget,
@@ -61,7 +61,6 @@ import {
   generateTrialOfferEmail,
   generateLandingPage,
 } from './llm';
-import { findOrCreateStripeCustomer, isStripeLive } from './stripe-billing';
 import {
   isCallRailEnabled,
   provisionCallRailTracker,
@@ -300,10 +299,10 @@ async function tryAddTarget(
 
 /**
  * Find one target that needs scraping, in priority order:
- *   P1 — target with NO prospects yet (initial scrape).
- *   P2 — target lastScrapedAt is > SCRAPE_COOLDOWN_MS ago AND fewer
- *        than 10 prospects (continuous re-scrape for fresh leads).
- *   P3 — target with fewer than 5 prospects (low yield).
+ * P1 — target with NO prospects yet (initial scrape).
+ * P2 — target lastScrapedAt is > SCRAPE_COOLDOWN_MS ago AND fewer
+ * than 10 prospects (continuous re-scrape for fresh leads).
+ * P3 — target with fewer than 5 prospects (low yield).
  * Among ties within a tier, picks randomly.
  *
  * Then SCRAPE that target and deduplicate the result against the
@@ -385,69 +384,6 @@ async function tryScrapeForTarget(
     target.lastScrapedAt = new Date().toISOString();
     await saveTarget(target);
     return null;
-  }
-}
-
-/**
- * Create a Stripe customer for ONE verified lead per cycle. Only leads
- * that have BOTH a verified phone AND email are eligible. Uses
- * findOrCreateStripeCustomer from stripe-billing.ts which is idempotent
- * (reuses existing customers by email). Skips entirely if Stripe isn't
- * configured (isStripeLive returns false) so local dev works without a
- * real Stripe key.
- */
-async function tryCreateStripeCustomerOne(
-  log: ReturnType<typeof makeLogBuffer>,
-): Promise<boolean> {
-  if (!isStripeLive()) return false;
-
-  const prospects = await getProspects();
-  
-  // Find a prospect in the Trial phase that has phone and email, but lacks a stripeCustomerId.
-  const lead = prospects.find(
-    (p) =>
-      p.phone &&
-      p.email &&
-      !p.stripeCustomerId &&
-      p.stripeCustomerId !== 'failed' &&
-      p.pitchStatus === 'Trial'
-  );
-  if (!lead) return false;
-
-  log.push(
-    `💳 Creating Stripe customer for "${lead.name}" (${lead.email})...`,
-    'process',
-  );
-  try {
-    const customer = await findOrCreateStripeCustomer(lead);
-    lead.stripeCustomerId = customer.id;
-    await saveProspect(lead);
-    log.push(
-      `✅ Stripe customer ${customer.id} created for "${lead.name}".`,
-      'success',
-    );
-    return true;
-  } catch (err: any) {
-    const errMsg = err?.message || String(err);
-    const isClientError =
-      errMsg.includes('HTTP 400') ||
-      errMsg.includes('HTTP 402') ||
-      errMsg.includes('HTTP 404') ||
-      errMsg.includes('HTTP 422');
-    if (isClientError) {
-      log.push(
-        `❌ Stripe customer creation failed for "${lead.name}" (client error): ${errMsg}. Marking as failed to skip.`,
-        'warn',
-      );
-      lead.stripeCustomerId = 'failed';
-    } else {
-      log.push(
-        `⚠️ Stripe customer creation failed for "${lead.name}" (transient): ${errMsg}. Will retry next cycle.`,
-        'warn',
-      );
-    }
-    await saveProspect(lead);
-    return true;
   }
 }
 
@@ -791,13 +727,12 @@ function timeoutResult(
  * blocking the loop forever.
  *
  * Priority order:
- *   1. Add a new niche × city target (grow portfolio)
- *   2. Scrape fresh leads for the most eligible target
- *   3. Create a Stripe customer for a qualified lead
- *   4. Generate an outreach pitch for one lead
- *   5. Provision a CallRail tracking line for a target
- *   6. Build a landing page for a target
- *   7. Queue a trial offer email for one prospect
+ * 1. Add a new niche × city target (grow portfolio)
+ * 2. Scrape fresh leads for the most eligible target
+ * 3. Generate an outreach pitch for one lead
+ * 4. Provision a CallRail tracking line for a target
+ * 5. Build a landing page for a target
+ * 6. Queue a trial offer email for one prospect
  */
 export async function runAutopilotCycle(): Promise<AutopilotCycleResult> {
   const log = makeLogBuffer();
@@ -831,35 +766,28 @@ export async function runAutopilotCycle(): Promise<AutopilotCycleResult> {
           `Scraped ${scrapeResult.newLeadCount} new leads for ${scrapeResult.target.niche} in ${scrapeResult.target.city}.`);
       }
 
-      // Priority 4: Create Stripe customer for a qualified lead
-      const stripeCreated = await tryCreateStripeCustomerOne(log);
-      if (stripeCreated) {
-        return finish(log, start, 'create_stripe_customer',
-          'Created Stripe customer for a lead.');
-      }
-
-      // Priority 5: Send trial offer email
+      // Priority 3: Send trial offer email
       const trialSent = await trySendTrialEmail(log);
       if (trialSent) {
         return finish(log, start, 'send_trial_email',
           'Queued trial offer email.');
       }
 
-      // Priority 6: Build a landing page
+      // Priority 4: Build a landing page
       const siteResult = await tryBuildSite(log);
       if (siteResult) {
         return finish(log, start, 'build_site',
           'Built landing page for a lead.');
       }
 
-      // Priority 7: Provision a CallRail tracking line
+      // Priority 5: Provision a CallRail tracking line
       const lineProvisioned = await tryProvisionTrackingLine(log);
       if (lineProvisioned) {
         return finish(log, start, 'provision_line',
           'Provisioned CallRail tracking line for a lead.');
       }
 
-      // Priority 8: Pitch one lead
+      // Priority 6: Pitch one lead
       const pitched = await tryPitchOne(log);
       if (pitched) {
         return finish(log, start, 'pitch_lead',
